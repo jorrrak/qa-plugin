@@ -179,6 +179,44 @@ case without a word. It now refuses the save with a message naming the limit, an
 a quota failure is translated into "export the library, then clear some cases"
 rather than a raw `QUOTA_BYTES quota exceeded`.
 
+### Zephyr Scale export (Jira)
+
+`Zephyr Scale (CSV)` and `Zephyr Scale (Excel)` write the shape Zephyr's test-case
+importer expects: `Name`, `Objective`, `Precondition`, then one row per step with
+`Test Script (Step-by-Step) - Step / Test Data / Expected Result`. Case-level
+fields appear on the first row of each test case and are left blank on the
+continuation rows, which is how Zephyr Scale groups rows into one case.
+
+The column names are the easy half. The real work is that **Zephyr and a recorder
+disagree about what a step is**. Zephyr models one step as a triple — do this,
+with this data, expect that. A recording has the assertion as its *own* step,
+sitting after the action it checks. So `foldSteps` in `lib/export/zephyr.ts`
+merges each run of assertions into the preceding action's Expected Result:
+
+| Recorded | Exported |
+|---|---|
+| `4 Click "Log in"` | Step: `Click "Log in" button` |
+| `5 Assert URL …/home` | → folded into step 4's Expected Result |
+| `6 Assert text "Dashboard"` | → folded into step 4's Expected Result, second line |
+
+An assertion with no action before it becomes a `Verify: …` step of its own rather
+than being dropped. The opening navigation becomes the Precondition, not a step.
+
+Test data appears as `${TEST_PHONE}`, never the literal — a Jira ticket is visible
+to far more people than a test repository.
+
+**Locators are deliberately omitted.** Zephyr has no field for an XPath, and a
+test case a person reads should not carry one. This export is the human test case;
+Playwright/CSV/YAML remain the automation artefact.
+
+Verified with Python's `csv` module and openpyxl: 20 assertions covering the
+column layout, the fold, blank continuation rows, the leading-assertion case, and
+that no literal credential or locator reaches the file.
+
+Built for **Zephyr Scale** (formerly TM4J), whose importer takes CSV/Excel.
+Zephyr Squad loads steps through its own API rather than a file, so the same
+transformation would need a different carrier there.
+
 ### YAML export
 
 **Test cases (YAML)** writes a readable, diff-friendly document — the reason to
