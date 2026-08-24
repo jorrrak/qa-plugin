@@ -1,0 +1,47 @@
+@import 'tailwindcss';
+
+/*
+ * The UI is English, but recorded data is not UI text: capturing a flow on a
+ * Persian site fills the step list with Persian element names. Vazirmatn
+ * (SIL OFL 1.1) is bundled to render those.
+ *
+ * `unicode-range` is what makes this work, and it is not optional. Vazirmatn has
+ * to sit *before* the system face in the stack, because per-glyph fallback only
+ * advances when the current family lacks the glyph — and macOS system-ui does
+ * cover Arabic, so a Vazirmatn placed later is never reached. Declaring the
+ * range instead means:
+ *   - Latin codepoints fall straight through to the system face
+ *   - Persian codepoints resolve to Vazirmatn
+ *   - the 111KB file is not even requested until Persian text is rendered
+ *
+ * The range covers Arabic, Arabic Supplement/Extended-A, the presentation forms,
+ * and U+200C/200D — the zero-width non-joiner Persian depends on.
+ */
+@font-face {
+  font-family: 'Vazirmatn';
+  src: url('/fonts/Vazirmatn-Variable.woff2') format('woff2-variations');
+  unicode-range:
+    U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF, U+200C-200D,
+    U+060C, U+061B, U+061F, U+06F0-06F9;
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans:
+    'Vazirmatn', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+}
