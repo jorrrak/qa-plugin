@@ -18,6 +18,7 @@ import { listVariables } from '@/lib/variables';
 
 /** Right-click entries the tester uses to add a check mid-recording. */
 const ASSERT_MENU: { id: AssertAction; title: string }[] = [
+  { id: 'assertTextPresent', title: 'Assert this text appears on the page' },
   { id: 'assertText', title: 'Assert this element\'s text' },
   { id: 'assertValue', title: "Assert this field's value" },
   { id: 'assertVisible', title: 'Assert this element is visible' },
@@ -75,7 +76,8 @@ async function handle(message: Message, sender: chrome.runtime.MessageSender) {
       // content script in it. Without this the record button silently does
       // nothing, which is the worst possible first-run experience.
       await ensureInjected(message.tabId);
-      const session = await setRecording(message.tabId, true);
+      let session = await setRecording(message.tabId, true);
+      session = await recordOpeningUrl(message.tabId, session);
       // Variables first: a value typed in the first second of recording should
       // already be substituted.
       sendToTab(message.tabId, { type: 'setVariables', variables: await listVariables() });
@@ -131,6 +133,36 @@ async function ensureInjected(tabId: number): Promise<void> {
     // chrome:// pages, the Web Store and PDF viewers refuse injection. Recording
     // there is not possible at all, so there is nothing to recover.
   }
+}
+
+/** Only a page the generated script could actually open. */
+function isRecordableUrl(url: string | undefined): url is string {
+  return !!url && /^https?:\/\//.test(url);
+}
+
+/**
+ * A recording has to begin by opening the page under test.
+ *
+ * Navigation steps otherwise come only from a page load that happens *while*
+ * recording — so the normal workflow, open the page and then press record,
+ * produced a script with no `goto` at all. It would start on a blank page and
+ * fail on its first click, with nothing in the output hinting at why.
+ */
+async function recordOpeningUrl(tabId: number, current: Session): Promise<Session> {
+  // Only at the start of a fresh recording. Resuming one that already has steps
+  // must not splice a navigation into the middle of the flow.
+  if (current.steps.length > 0) return current;
+
+  const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+  if (!isRecordableUrl(tab?.url)) return current;
+
+  return appendStep(tabId, {
+    id: uid('step'),
+    action: 'navigate',
+    value: tab.url,
+    url: tab.url,
+    timestamp: Date.now(),
+  });
 }
 
 function broadcastAndReturn(session: Session): Session {

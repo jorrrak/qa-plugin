@@ -12,7 +12,7 @@ export default defineConfig({
     plugins: [tailwindcss()],
   }),
   manifest: {
-    name: 'QA Plugin — Test Recorder',
+    name: 'QA Test Case Recorder',
     description:
       'Record test cases with XPath + accessible names, generate automation scripts, and catch bugs as they happen.',
     permissions: [
@@ -26,7 +26,7 @@ export default defineConfig({
     ],
     host_permissions: ['<all_urls>'],
     action: {
-      default_title: 'Open QA Panel',
+      default_title: 'QA Test Case Recorder',
     },
   },
 });

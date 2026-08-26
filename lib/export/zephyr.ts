@@ -61,6 +61,10 @@ function stepSentence(step: RecordedStep): string {
       return `Press ${step.key ?? 'Enter'} in ${elementPhrase(step)}`;
     case 'submit':
       return `Submit ${elementPhrase(step)}`;
+    case 'scrollTo':
+      return `Scroll until ${elementPhrase(step)} is in view`;
+    case 'scrollToBottom':
+      return `Scroll to the bottom of the list ${step.repeat ?? 1} time(s) to load more items`;
     default:
       return `Verify ${elementPhrase(step)}`;
   }
@@ -72,6 +76,10 @@ function expectationSentence(step: RecordedStep): string {
   switch (step.action) {
     case 'assertText':
       return `${element} shows "${step.value ?? ''}"`;
+    case 'assertTextPresent':
+      // Deliberately says nothing about which element: that is the point of this
+      // assertion, and a manual tester reads it the same way.
+      return `The text "${step.value ?? ''}" appears on the page`;
     case 'assertValue':
       return `${element} contains "${step.value ?? ''}"`;
     case 'assertVisible':
@@ -134,7 +142,7 @@ function foldSteps(steps: RecordedStep[]): ZephyrStep[] {
 function objectiveFor(session: Session, variables: string[]): string {
   const assertions = session.steps.filter((step) => isAssertion(step.action)).length;
   const parts = [
-    `Recorded with QA Plugin on ${new Date(session.startedAt).toISOString().slice(0, 10)}.`,
+    `Recorded with QA Test Case Recorder on ${new Date(session.startedAt).toISOString().slice(0, 10)}.`,
     `${session.steps.length} recorded actions, ${assertions} assertion${assertions === 1 ? '' : 's'}.`,
   ];
   if (variables.length) {

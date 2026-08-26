@@ -2,7 +2,7 @@ import { defineContentScript } from 'wxt/utils/define-content-script';
 import { uid } from '@/lib/id';
 import { framePath, serveFramePathQueries } from '@/lib/frame-path';
 import { sendMessage, type Message } from '@/lib/messaging';
-import { describeElement, resolveInteractive } from '@/lib/selector-engine';
+import { describeElement, resolveInteractive, shortName } from '@/lib/selector-engine';
 import { matchVariable, type TestVariable } from '@/lib/variables';
 import { EXACT_TEXT_LIMIT, type AssertAction, type IssueKind, type RecordedStep, type StepAction } from '@/lib/types';
 
@@ -49,6 +49,13 @@ export default defineContentScript({
      * so microtask ordering keeps them in the order they happened.
      */
     function emit(step: Omit<RecordedStep, 'seq'>): void {
+      // Anything but a scroll counts as an action the page may scroll in response
+      // to, which is what the scroll filter waits out.
+      if (step.action !== 'scrollTo' && step.action !== 'scrollToBottom') {
+        lastActionAt = Date.now();
+      }
+      // A different action means the next load-more scroll is a new sequence.
+      if (step.action !== 'scrollToBottom') bottomRuns = 0;
       void framePath().then((path) => {
         void sendMessage({
           type: 'step',
@@ -72,6 +79,60 @@ export default defineContentScript({
       };
     }
 
+    /* ---- typing: live updates, and mask detection ---------------------- */
+
+    /** Identity for a field across keystrokes, stable within one document. */
+    function elementKey(el: Element): string {
+      return describeElement(el).xpath;
+    }
+
+    /** What the user actually pressed, per field, to compare against the result. */
+    const typedBuffers = new Map<string, string>();
+    const liveTimers = new Map<string, number>();
+
+    function recordTypedChar(el: Element, ch: string): void {
+      const k = elementKey(el);
+      typedBuffers.set(k, (typedBuffers.get(k) ?? '') + ch);
+      scheduleLiveFill(el, k);
+    }
+
+    /**
+     * A field being typed into emits one step that keeps being replaced, so the
+     * panel shows the value growing. Debounced, because otherwise every keystroke
+     * would be a message and a storage write.
+     */
+    function scheduleLiveFill(el: Element, k: string): void {
+      const existing = liveTimers.get(k);
+      if (existing) clearTimeout(existing);
+      liveTimers.set(
+        k,
+        window.setTimeout(() => {
+          liveTimers.delete(k);
+          if (!recording || !el.isConnected) return;
+          const value = (el as HTMLInputElement).value ?? '';
+          const isPassword = el instanceof HTMLInputElement && el.type.toLowerCase() === 'password';
+          if (isPassword) {
+            // Never send a partial password. The provisional step just marks the
+            // field as being filled; `change` resolves it properly.
+            emit(build('fill', el, { sensitive: true, upsertKey: k }));
+            return;
+          }
+          emit(build('fill', el, { ...valueOrVariable(value), upsertKey: k }));
+        }, 200),
+      );
+    }
+
+    /**
+     * True when the field's value is not what was typed — an input mask rewrote
+     * it. Assigning the masked result back with `fill()` would bypass the mask,
+     * so the raw keystrokes have to be replayed instead.
+     */
+    function maskedTyping(el: Element, finalValue: string): string | undefined {
+      const typed = typedBuffers.get(elementKey(el));
+      if (!typed || typed.length === 0) return undefined;
+      return typed !== finalValue ? typed : undefined;
+    }
+
     /**
      * A value that matches known test data is stored as a reference, not a
      * literal — so one fixed phone number never ends up baked into fifty
@@ -80,6 +141,23 @@ export default defineContentScript({
     function valueOrVariable(value: string): Partial<RecordedStep> {
       const hit = matchVariable(value, variables);
       return hit ? { variable: hit.name } : { value };
+    }
+
+    /** The settled fill step for a field, once focus has left it. */
+    function finalFill(el: Element, value: string): Omit<RecordedStep, 'seq'> {
+      const k = elementKey(el);
+      const pending = liveTimers.get(k);
+      if (pending) {
+        clearTimeout(pending);
+        liveTimers.delete(k);
+      }
+
+      const raw = maskedTyping(el, value);
+      typedBuffers.delete(k);
+
+      return raw
+        ? build('fill', el, { value: raw, typeSequentially: true, upsertKey: k })
+        : build('fill', el, { ...valueOrVariable(value), upsertKey: k });
     }
 
     function flushPendingClick(): void {
@@ -155,26 +233,202 @@ export default defineContentScript({
           );
           return;
         }
-        emit(build('fill', el, valueOrVariable(el.value)));
+        emit(finalFill(el, el.value));
         return;
       }
 
       if (el instanceof HTMLTextAreaElement) {
-        emit(build('fill', el, valueOrVariable(el.value)));
+        emit(finalFill(el, el.value));
       }
     }
 
-    /** Only keys that carry meaning in a test. Everything else is noise. */
-    const RECORDED_KEYS = new Set(['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown']);
+    /**
+     * Keys that mean something wherever they are pressed. Tab stays in the list
+     * even inside a field, because tabbing out *is* the action that moves on, and
+     * the arrows stay because that is how an autocomplete list is navigated.
+     */
+    const ALWAYS_KEYS = new Set(['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown']);
+
+    /**
+     * Keys that only carry meaning outside a text field. Inside one they move the
+     * caret or edit characters, and the resulting text is already captured by the
+     * fill step — recording them would describe the same edit twice.
+     */
+    const OUTSIDE_TEXT_KEYS = new Set([
+      'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown',
+      'Backspace', 'Delete',
+    ]);
+
+    function isTextEntry(el: Element): boolean {
+      if (el instanceof HTMLTextAreaElement) return true;
+      if (el.hasAttribute('contenteditable')) return true;
+      if (el instanceof HTMLInputElement) {
+        return !['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range'].includes(
+          el.type.toLowerCase(),
+        );
+      }
+      return false;
+    }
+
+    /** Playwright's key syntax, which Cypress and Selenium are mapped from. */
+    function keyName(event: KeyboardEvent): string | undefined {
+      const modifiers: string[] = [];
+      if (event.ctrlKey) modifiers.push('Control');
+      if (event.metaKey) modifiers.push('Meta');
+      if (event.altKey) modifiers.push('Alt');
+      // Shift is only a modifier worth naming alongside another modifier or a
+      // non-printable key; "Shift+a" is just "A".
+      if (event.shiftKey && (modifiers.length > 0 || event.key.length > 1)) {
+        modifiers.push('Shift');
+      }
+
+      const base = event.key === ' ' ? 'Space' : event.key;
+
+      if (modifiers.length > 0) {
+        // A bare modifier press on its own is not an action.
+        if (['Control', 'Meta', 'Alt', 'Shift'].includes(base)) return undefined;
+        return [...modifiers, base.length === 1 ? base.toUpperCase() : base].join('+');
+      }
+
+      const target = event.target;
+      const inText = target instanceof Element && isTextEntry(target);
+      if (ALWAYS_KEYS.has(base)) return base;
+      if (!inText && OUTSIDE_TEXT_KEYS.has(base)) return base;
+      return undefined;
+    }
 
     function onKeyDown(event: KeyboardEvent): void {
       if (!recording || !event.isTrusted) return;
-      if (!RECORDED_KEYS.has(event.key)) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
 
+      // Printable characters feed the mask detector rather than becoming steps.
+      if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (isTextEntry(target)) recordTypedChar(target, event.key);
+        return;
+      }
+      if (event.key === 'Backspace' && isTextEntry(target)) {
+        typedBuffers.set(elementKey(target), (typedBuffers.get(elementKey(target)) ?? '').slice(0, -1));
+      }
+
+      const key = keyName(event);
+      if (!key) return;
+
       flushPendingClick();
-      emit(build('press', target, { key: event.key }));
+      emit(build('press', target, { key }));
+    }
+
+    /* ---- scrolling ------------------------------------------------------ */
+
+    /** A scroll burst is one intent, not the fifty events the browser fires. */
+    const SCROLL_SETTLE_MS = 400;
+    /** Below this the scroll was incidental, not something a test needs to do. */
+    const SCROLL_MIN_DELTA = 60;
+    /**
+     * Clicks and navigations scroll the page themselves, and every framework
+     * scrolls an element into view before acting on it. Recording those would add
+     * a step that the generated script would perform twice.
+     */
+    const SCROLL_IGNORE_AFTER_ACTION_MS = 700;
+
+    let scrollTimer = 0;
+    let scrollAnchorY: number | null = null;
+    let lastActionAt = 0;
+
+    /** Within this of the bottom counts as "at the bottom". */
+    const BOTTOM_SLACK_PX = 150;
+    /** Content loading is asynchronous, so the growth check has to wait for it. */
+    const LOAD_WAIT_MS = 900;
+    /** Below this the document did not really grow. */
+    const GROWTH_MIN_PX = 120;
+
+    /**
+     * Consecutive load-more scrolls collapse into one step whose repeat count
+     * grows, rather than one step per round. Any other action ends the run.
+     */
+    let bottomRuns = 0;
+
+    const documentHeight = () =>
+      Math.max(
+        document.documentElement.scrollHeight,
+        document.body?.scrollHeight ?? 0,
+      );
+
+    const atBottom = () =>
+      window.scrollY + window.innerHeight >= documentHeight() - BOTTOM_SLACK_PX;
+
+    /**
+     * The element a reader would say the page scrolled *to*: the one nearest the
+     * middle of the viewport that a locator can actually name.
+     */
+    function elementAtViewportCentre(): Element | undefined {
+      const cx = window.innerWidth / 2;
+      const cy = window.innerHeight / 2;
+      // Probe a short vertical band, since the exact centre may be empty space.
+      for (const dy of [0, -60, 60, -120, 120]) {
+        const hit = document.elementFromPoint(cx, cy + dy);
+        if (!hit || hit === document.body || hit === document.documentElement) continue;
+        const named = hit.closest(
+          'button, a[href], input, select, textarea, [role="button"], [data-testid], h1, h2, h3, li, article, section',
+        );
+        const candidate = named ?? hit;
+        if (candidate.getAttribute('data-qa-plugin-ui')) continue;
+        if (shortName(candidate) || candidate.getAttribute('data-testid')) return candidate;
+      }
+      return undefined;
+    }
+
+    function onScroll(): void {
+      if (!recording) return;
+      if (Date.now() - lastActionAt < SCROLL_IGNORE_AFTER_ACTION_MS) return;
+
+      if (scrollAnchorY === null) scrollAnchorY = window.scrollY;
+      clearTimeout(scrollTimer);
+      scrollTimer = window.setTimeout(() => {
+        const from = scrollAnchorY ?? window.scrollY;
+        scrollAnchorY = null;
+        if (Math.abs(window.scrollY - from) < SCROLL_MIN_DELTA) return;
+
+        // At the bottom of the page this may be an infinite list rather than a
+        // scroll to something. The two are told apart by whether the document
+        // then grows, which only becomes visible after the fetch resolves.
+        if (atBottom()) {
+          const heightBefore = documentHeight();
+          window.setTimeout(() => {
+            if (!recording) return;
+            if (documentHeight() - heightBefore >= GROWTH_MIN_PX) {
+              bottomRuns += 1;
+              flushPendingClick();
+              // Same upsert key each round, so the store replaces the previous
+              // step and the count accumulates in place.
+              emit({
+                id: uid('step'),
+                action: 'scrollToBottom',
+                repeat: bottomRuns,
+                upsertKey: 'scroll-to-bottom',
+                url: location.href,
+                timestamp: Date.now(),
+              });
+              return;
+            }
+            // The page did not grow: an ordinary scroll that happened to end low.
+            const late = elementAtViewportCentre();
+            if (late) {
+              flushPendingClick();
+              emit(build('scrollTo', late));
+            }
+          }, LOAD_WAIT_MS);
+          return;
+        }
+
+        const anchor = elementAtViewportCentre();
+        // With nothing nameable in view there is no robust step to generate, and
+        // a raw offset would be worse than no step at all.
+        if (!anchor) return;
+
+        flushPendingClick();
+        emit(build('scrollTo', anchor));
+      }, SCROLL_SETTLE_MS);
     }
 
     /** The element the user last right-clicked; the menu event does not carry it. */
@@ -184,6 +438,12 @@ export default defineContentScript({
       const target = event.target;
       if (target instanceof Element) lastContextTarget = target;
     }
+
+    /**
+     * Substring matching makes a long phrase *more* brittle, not less: any copy
+     * edit anywhere inside it breaks the assertion.
+     */
+    const PRESENT_TEXT_LIMIT = 120;
 
     function readableText(el: Element): string {
       const text = ((el as HTMLElement).innerText ?? el.textContent ?? '')
@@ -197,6 +457,34 @@ export default defineContentScript({
     function captureAssertion(kind: AssertAction): void {
       if (!recording) {
         toast('Start recording before adding an assertion');
+        return;
+      }
+
+      if (kind === 'assertTextPresent') {
+        // A selection is the more precise intent: the tester highlighted exactly
+        // the phrase they mean. Without one, fall back to the element's text.
+        const selected = (window.getSelection()?.toString() ?? '').replace(/\s+/g, ' ').trim();
+        const source = selected || (lastContextTarget ? readableText(lastContextTarget) : '');
+        const text = source.slice(0, PRESENT_TEXT_LIMIT).trim();
+
+        if (!text) {
+          toast('No text there — select the phrase, then right-click it');
+          return;
+        }
+
+        emit({
+          id: uid('step'),
+          action: 'assertTextPresent',
+          value: text,
+          // The element is kept for the panel to show where the text came from;
+          // the generated locator targets the text, not this element.
+          target: lastContextTarget?.isConnected
+            ? describeElement(lastContextTarget)
+            : undefined,
+          url: location.href,
+          timestamp: Date.now(),
+        });
+        toast(`Will assert "${text.slice(0, 40)}" appears`);
         return;
       }
 
@@ -276,6 +564,8 @@ export default defineContentScript({
     document.addEventListener('change', onChange, true);
     document.addEventListener('keydown', onKeyDown, true);
     document.addEventListener('contextmenu', onContextMenu, true);
+    // Capture phase, so a scrolling container is seen as well as the document.
+    document.addEventListener('scroll', onScroll, true);
 
     // Bugs are collected whether or not we are recording, so a tester who
     // notices something wrong can look back at what already happened.

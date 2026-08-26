@@ -6,6 +6,7 @@ import { toZephyrCsv, toZephyrXlsx } from '../export/zephyr';
 import { toCypress } from './cypress';
 import { toMarkdown } from './markdown';
 import { toPlaywright } from './playwright';
+import { toPlaywrightPython } from './playwright-python';
 import { toSeleniumPython } from './selenium-python';
 import type { CodegenOptions } from './shared';
 
@@ -14,6 +15,7 @@ export type { CodegenOptions, LocatorStrategy } from './shared';
 export type OutputFormat =
   | 'playwright'
   | 'cypress'
+  | 'playwright-python'
   | 'selenium-python'
   | 'markdown'
   | 'csv'
@@ -42,6 +44,10 @@ export const FORMAT_META: Record<
   },
   cypress: {
     label: 'Cypress (JS)', language: 'javascript', extension: 'cy.js',
+    mime: 'text/plain;charset=utf-8', usesLocatorStrategy: true,
+  },
+  'playwright-python': {
+    label: 'Playwright (Python)', language: 'python', extension: 'py',
     mime: 'text/plain;charset=utf-8', usesLocatorStrategy: true,
   },
   'selenium-python': {
@@ -94,6 +100,8 @@ export function generate(
       return toPlaywright(sessions, options);
     case 'cypress':
       return toCypress(sessions, options);
+    case 'playwright-python':
+      return toPlaywrightPython(sessions, options);
     case 'selenium-python':
       return toSeleniumPython(sessions, options);
     case 'markdown':

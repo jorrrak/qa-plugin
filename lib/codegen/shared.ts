@@ -109,10 +109,88 @@ export function cypressValueExpr(step: {
   return { expr: js(step.value ?? ''), quiet: false };
 }
 
+export const BASE_URL_VARIABLE = 'BASE_URL';
+
+/**
+ * The path part of a recorded URL, when it sits under the configured base.
+ *
+ * Applied at generation time rather than at recording time: the recorded URL is a
+ * fact, while the base is a presentation choice. Doing it here means one
+ * recording can produce an absolute script or a base-relative one, and that
+ * defining BASE_URL after recording still works.
+ */
+export function relativeToBase(url: string, baseUrl: string | undefined): string | undefined {
+  if (!baseUrl) return undefined;
+  const base = baseUrl.replace(/\/+$/, '');
+  if (!base || !url.startsWith(base)) return undefined;
+
+  const rest = url.slice(base.length);
+  if (rest === '') return '/';
+  // Guards against `https://app.test` matching `https://app.testing.com`.
+  if (!rest.startsWith('/') && !rest.startsWith('?') && !rest.startsWith('#')) {
+    return undefined;
+  }
+  return rest.startsWith('/') ? rest : `/${rest}`;
+}
+
 /** Every variable a set of steps needs, for the header of a generated file. */
 export function requiredVariables(
-  steps: { sensitive?: boolean; variable?: string }[],
+  steps: { sensitive?: boolean; variable?: string; action?: string; value?: string; url?: string }[],
+  baseUrl?: string,
 ): string[] {
   const names = steps.map((step) => step.variable ?? (step.sensitive ? 'TEST_PASSWORD' : undefined));
+
+  // BASE_URL only counts as required if a navigation actually resolved against it.
+  const usesBase = steps.some(
+    (step) =>
+      step.action === 'navigate' &&
+      relativeToBase(step.value ?? step.url ?? '', baseUrl) !== undefined,
+  );
+  if (usesBase) names.push(BASE_URL_VARIABLE);
+
   return [...new Set(names.filter((n): n is string => !!n))].sort();
+}
+
+/**
+ * Warns when a recording never captured the page it started on.
+ *
+ * Recordings made before the recorder logged the opening URL have no navigation
+ * step, so the generated script begins on a blank page and fails on its first
+ * action. Saying so at the top of the file is the difference between a five-minute
+ * fix and an afternoon of debugging a locator that was never the problem.
+ */
+export function missingNavigationNote(
+  steps: { action: string; url?: string }[],
+): string | undefined {
+  if (steps.length === 0) return undefined;
+  if (steps.some((step) => step.action === 'navigate')) return undefined;
+
+  const firstUrl = steps.find((step) => step.url)?.url;
+  return `FIXME: this recording has no opening navigation — it was recorded on a page that was already open. Add it as the first step${
+    firstUrl ? `, e.g. ${firstUrl}` : ''
+  }.`;
+}
+
+/**
+ * A Python identifier from a test-case title.
+ *
+ * Only ASCII survives here, so a Persian or Arabic title slugs down to nothing —
+ * the position is used instead, and callers keep the real title as a docstring.
+ */
+export function pythonIdentifier(title: string, index: number): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!slug || /^\d/.test(slug)) return `case_${index + 1}`;
+  return slug;
+}
+
+/** Makes a set of identifiers unique, so two same-titled cases cannot collide. */
+export function uniqueIdentifier(base: string, taken: Set<string>): string {
+  let name = base;
+  let suffix = 2;
+  while (taken.has(name)) name = `${base}_${suffix++}`;
+  taken.add(name);
+  return name;
 }

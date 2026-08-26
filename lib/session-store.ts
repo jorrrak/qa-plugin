@@ -58,6 +58,17 @@ export function appendStep(
 ): Promise<Session> {
   return mutateSession(tabId, (session) => {
     if (!session.recording) return session;
+
+    // A step carrying an upsertKey replaces the previous one from the same source
+    // instead of appending. That is what makes a field being typed into show up
+    // as one growing step rather than one step per keystroke — and it must only
+    // match the *last* step, so returning to a field later is a new action.
+    const last = session.steps[session.steps.length - 1];
+    if (last && step.upsertKey && last.upsertKey === step.upsertKey) {
+      const steps = [...session.steps.slice(0, -1), { ...step, seq: last.seq }];
+      return { ...session, steps };
+    }
+
     const full: RecordedStep = { ...step, seq: session.nextSeq };
     const steps = [...session.steps, full].slice(-MAX_STEPS);
     return { ...session, steps, nextSeq: session.nextSeq + 1 };

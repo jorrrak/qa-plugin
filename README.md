@@ -1,8 +1,27 @@
-# QA Plugin — Test Recorder
+# QA Test Case Recorder
 
 A Chrome extension for QA work: record test cases capturing **XPath and the
 element's visible name**, generate **automation scripts**, and **detect bugs** as
 they happen.
+
+![What it does](docs/demo.gif)
+
+*An illustration of the workflow, not a screen recording — see
+[Running it](#running-it) to try the real thing.*
+
+Everything runs locally. No account, no server, no network requests: nothing you
+record leaves your machine.
+
+**License:** MIT.
+
+## Contents
+
+- [Running it](#running-it) · [Architecture](#architecture)
+- [What gets recorded](#what-gets-recorded) — clicks, typing, keys, scrolling, iframes
+- [Assertions](#assertions) · [Test data (variables)](#test-data-variables)
+- [Exports](#playwright-for-python) — Playwright (TS + Python), Cypress, Selenium,
+  Markdown, YAML, CSV, Excel, Zephyr Scale
+- [Publishing](#publishing)
 
 ## Running it
 
@@ -27,6 +46,21 @@ The output directory is `dist/`, not WXT's default `.output/` — a dot-prefixed
 directory is hidden in Finder and in Chrome's folder picker, which makes
 installing needlessly hard every time.
 
+### Load the right folder — this one bites
+
+`dist/chrome-mv3-dev` does **not** bundle the side panel's code; its
+`sidepanel.html` fetches it from the dev server on localhost. With the dev server
+stopped, that folder keeps serving whatever the panel last had, while
+`background.js` and the content scripts — which *are* in the folder — do update.
+The result is a build where some new features appear and others silently do not,
+with nothing in the console to explain it.
+
+`npx wxt build` only ever writes `dist/chrome-mv3`. Unless you are actively
+running `npm run dev`, load **`dist/chrome-mv3`**.
+
+If a feature seems missing, check `chrome://extensions` → "Loaded from" before
+looking at the code.
+
 ## Architecture
 
 | Part | Where it runs | Why there |
@@ -36,7 +70,7 @@ installing needlessly hard every time.
 | `entrypoints/background.ts` | service worker | The only writer to storage. Chrome tears it down after ~30s idle, so it keeps no state in memory. |
 | `entrypoints/sidepanel/` | side panel | The UI. Unlike a popup, it does not close when you click the page. |
 | `lib/selector-engine/` | shared | Locator generation. The heart of the project. |
-| `lib/codegen/` | shared | Playwright / Cypress / Selenium-Python / Markdown / JSON. |
+| `lib/codegen/` | shared | Playwright (TS and Python) / Cypress / Selenium / Markdown / YAML / spreadsheets / Zephyr. |
 | `lib/library.ts` | shared | Saved test cases. |
 
 ### Two decisions worth knowing about
@@ -53,9 +87,125 @@ console" and "clicking Save is broken".
 
 ## What gets recorded
 
+Pressing **Start recording** records the tab's current URL as the first step, so
+the generated script begins by opening the page under test.
+
+That is not incidental. Navigation steps otherwise come only from a page load that
+happens *while* recording, so the normal workflow — open the page, then press
+record — produced a script with no `goto` at all. It started on a blank page and
+failed on its first click, with nothing in the output pointing at the cause.
+
+Recordings saved before this behaviour existed still have no navigation step. For
+those, the generated script now opens with a `FIXME` naming the page it was
+recorded on, rather than failing silently.
+
+
 Clicks, double-clicks (a pending click is held for 220ms so a double-click can
 replace it rather than producing three steps), typing, select changes,
 checkbox/radio toggles, meaningful keys (Enter/Escape/Tab/arrows) and navigation.
+
+### Keys
+
+Keys fall into two groups, because the same key means different things in
+different places. `Enter`, `Escape`, `Tab` and the up/down arrows are recorded
+everywhere — tabbing out *is* the action that moves on, and up/down is how an
+autocomplete list is navigated. `ArrowLeft/Right`, `Home`, `End`, `PageUp/Down`,
+`Backspace` and `Delete` are recorded only **outside** a text field: inside one
+they move the caret or edit characters, and the resulting text is already captured
+by the fill step, so recording them would describe the same edit twice.
+
+Modifier combinations are always recorded, as Playwright key strings
+(`Control+A`, `Control+Shift+K`). The other frameworks are mapped from that:
+
+| | Control+A |
+|---|---|
+| Playwright | `press("Control+A")` |
+| Cypress | `type("{ctrl}a")` — lowercase on purpose; an uppercase letter in Cypress implies Shift, so `{ctrl}A` would send Ctrl+Shift+A |
+| Selenium | `ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL)`, with the element clicked first to focus it |
+
+### Typing, and masked fields
+
+A field being typed into produces **one** step that keeps being replaced as the
+value grows, rather than one step per keystroke or nothing at all until blur. The
+step is debounced by 200ms and upserted, so the panel shows the value appearing
+live.
+
+The recorder also compares the characters typed against the field's final value.
+When they differ, an input mask rewrote the input — a phone field turning
+`9121234567` into `(912) 123-4567` — and the step is marked `typeSequentially`
+with the **raw keystrokes** as its value. That matters because Playwright's
+`fill()` assigns a value directly, which a masked field never sees:
+
+```ts
+await page.getByLabel('Phone').pressSequentially('9121234567');  // masked
+await page.getByLabel('Email').fill('qa@test.dev');              // plain
+```
+
+Cypress and Selenium need no equivalent switch — `cy.type()` and `send_keys()` are
+already keystroke-by-keystroke.
+
+### Scrolling
+
+Recorded as an **intent, not an offset**. A burst of scroll events is coalesced
+into one step that names the element nearest the middle of the viewport when the
+scrolling settled:
+
+```ts
+await page.getByTestId('load-more').scrollIntoViewIfNeeded();
+```
+
+`window.scrollTo(0, 1200)` was deliberately not used: that number means something
+different on another viewport or with different content, and it is the kind of step
+that passes on the machine that recorded it and nowhere else.
+
+Three filters keep scroll steps from becoming noise, because most scrolling does
+not belong in a test at all — every framework already scrolls an element into view
+before acting on it:
+
+- movement under 60px is treated as incidental
+- scrolling within 700ms of a recorded action is ignored, since clicks and
+  navigations scroll the page themselves
+- if nothing nameable is in view, no step is recorded — an offset would be worse
+  than nothing
+
+### Infinite scroll
+
+Scrolling that *loads* content is a different action from scrolling that reveals
+it, and it is told apart by one decisive signal: **the document grows**. On a
+scroll that settles near the bottom, the recorder waits 900ms — long enough for
+the fetch to resolve — and checks whether `scrollHeight` increased. If it did,
+the step becomes `scrollToBottom` instead of an element scroll.
+
+Consecutive rounds collapse into **one** step whose repeat count grows, using the
+same upsert mechanism as live typing. Any other action ends the run, so a later
+load-more is a separate step.
+
+The generated code is a loop, and the recorded count is its **bound, not its
+body**. The same list loads a different number of pages on a different day, so
+what actually ends the loop is the height going stable:
+
+```ts
+let previousHeight = 0;
+for (let round = 0; round < 6; round += 1) {   // recorded 4 rounds, plus headroom
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(600);
+  const height = await page.evaluate(() => document.body.scrollHeight);
+  if (height === previousHeight) break;
+  previousHeight = height;
+}
+```
+
+`window.scrollTo(0, document.body.scrollHeight)` is used rather than a wheel
+gesture or an `End` keypress: it needs neither the pointer to be over the list nor
+the body to hold focus. And unlike the fixed offset rejected above, "the bottom" is
+a position with a meaning rather than a number that happened to be true once.
+
+Cypress is the exception — its command queue is not imperative, so a
+stop-when-it-stops-growing loop is not expressible. It repeats the recorded count
+with `cy.scrollTo('bottom')`, which is exactly what the tester did.
+
+Selenium's loop needs `time.sleep`, so `import time` appears only in files that
+contain one.
 
 **Password fields are never captured.** The step is flagged `sensitive` and the
 generated script reads `TEST_PASSWORD` from the environment — so a recorded login
@@ -85,6 +235,49 @@ Generated scripts open with the list of variables they need, and the Script tab
 shows the same list above the code, so nobody discovers a missing value one failed
 run at a time.
 
+### BASE_URL
+
+Define a variable named `BASE_URL` under Test data and every recorded navigation
+that sits under it is generated relative to it, so one test runs against staging
+and production instead of being copied per environment:
+
+```js
+await page.goto(process.env.BASE_URL + "/login");   // recorded on https://app.test/login
+await page.goto("https://payments.other.test/checkout"); // different host — left absolute
+```
+
+Cypress gets `Cypress.env("BASE_URL")` and Selenium `os.environ["BASE_URL"]`, so
+all three read the same file the **Download .env** button writes. Playwright's own
+`baseURL` config option would be more idiomatic, but it needs an edit to
+`playwright.config.ts` that the generated file cannot make — concatenation works
+with nothing but the variable set.
+
+This is resolved at generation time, not at recording time: the recorded URL is a
+fact, the base is a presentation choice. So defining `BASE_URL` after recording
+still works, and the same recording can produce either form.
+
+Prefix matching is on path boundaries — a base of `https://app.test` does not
+swallow `https://app.testing.com`.
+
+### Running the script: two different places
+
+The value in the Test data panel is used at **record** time, so the recorder can
+substitute a name for a literal. It is **not** what the script reads when it runs
+— if it were, the credential would end up in the repository, which is the thing
+this feature exists to prevent.
+
+At run time the script reads the environment: `process.env.NAME` for Playwright,
+`Cypress.env("NAME")` for Cypress, `os.environ["NAME"]` for Selenium.
+
+**Download .env** in the Script tab writes that file, with the variable names
+already correct — `cypress.env.json` when the selected format is Cypress, `.env`
+otherwise. Non-secret values are filled in; **secret values are left blank** with
+a comment naming them. Writing a password into a downloaded file is how it ends up
+in a commit, and a blank line is a better prompt than a filled one.
+
+Both files must be gitignored. `cypress.env.json` especially — it sits at the
+project root and looks like ordinary config.
+
 ### The password case
 
 A password field is the one place the recorder reads a password at all. The
@@ -111,6 +304,7 @@ Mid-recording, **right-click** any element → "QA — add assertion":
 
 | Menu entry | Playwright output |
 |---|---|
+| Assert this text appears on the page | `expect(page.getByText("…").first()).toBeVisible()` |
 | Assert this element's text | `expect(loc).toHaveText(...)`, or `toContainText` past 60 characters |
 | Assert this field's value | `expect(loc).toHaveValue(...)` |
 | Assert this element is visible | `expect(loc).toBeVisible()` |
@@ -127,6 +321,88 @@ points at no real bug.
 For text assertions the element is exactly what was right-clicked. For visibility
 and value assertions it resolves up to the nearest interactive ancestor — when
 you right-click the label inside a button, you meant the button.
+
+### Element text vs. text on the page
+
+These two look similar and fail differently, which is the whole reason both exist.
+
+`Assert this element's text` binds to a locator: `//h2[@id="status"]` must hold
+"Order confirmed". Move that message from an `<h2>` to a `<div>` and the test
+fails while nothing is actually broken.
+
+`Assert this text appears on the page` binds to the text and says nothing about
+the markup — `getByText`, `cy.contains`, or an XPath over text nodes. Use it for
+success messages, error banners and toasts, which is exactly the content that
+gets re-homed in the DOM. Use the element-bound one when *where* the text appears
+is part of what you are testing.
+
+If you select a phrase before right-clicking, that selection is what gets
+asserted; otherwise the element's own text is used, capped at 120 characters —
+substring matching makes a long phrase more brittle, not less, since any copy edit
+inside it breaks the assertion.
+
+Three details in the generated code that are not cosmetic:
+
+- Playwright gets `.first()`. `getByText` can match several nodes, and strict mode
+  turns that into a "strict mode violation" instead of a useful failure.
+- Selenium gets `//*[text()[contains(normalize-space(.), …)]]`, not
+  `//*[contains(., …)]` — the latter also matches `<html>` and `<body>`, which
+  contain every string on the page and therefore always pass.
+- The expected text lands inside an XPath literal inside a Python literal, so it
+  is quoted for XPath first. Text holding both quote characters cannot be a single
+  XPath 1.0 literal at all, so that case emits a FIXME rather than broken XPath.
+
+## Playwright for Python
+
+`Playwright (Python)` emits the shape `playwright codegen --target python` does:
+the synchronous API driven from a `run(playwright)` function, launched at the
+bottom by a `with sync_playwright()` block, with the `# ---------------------`
+marker before teardown.
+
+```python
+from playwright.sync_api import Playwright, sync_playwright, expect
+
+
+def run(playwright: Playwright) -> None:
+    browser = playwright.chromium.launch(headless=False)
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto("https://www.digikala.com/")
+    page.get_by_role("button", name="ورود | ثبت‌نام").click()
+    page.get_by_test_id("add-to-cart").click()
+    expect(page.get_by_text("سبد خرید").first).to_be_visible()
+
+    # ---------------------
+    context.close()
+    browser.close()
+
+
+with sync_playwright() as playwright:
+    run(playwright)
+```
+
+Not a pytest module, deliberately: this is the form a tester runs with
+`python flow.py` to watch the browser do it, which is what a freshly recorded flow
+is for.
+
+Four differences from the TypeScript output that are not stylistic:
+
+- Methods are snake_case and the accessible name is a keyword argument:
+  `get_by_role("button", name="…")`.
+- `.first` is a **property** in Python, not the method it is in JavaScript, so the
+  text-presence assertion ends `.get_by_text(…).first)` with no call parentheses.
+- `import os` and `expect` are emitted only when the body uses them. Playwright's
+  own codegen emits both unconditionally along with an unused `import re`, which
+  is a lint failure under ruff's F401 in most projects.
+- Exporting several test cases produces one `run_<name>` function each, called in
+  order from the same `with` block. A title that cannot become an ASCII identifier
+  — Persian, for instance — becomes `run_case_1` with the real title kept as the
+  function's docstring.
+
+`exact=True` is not emitted. Playwright's codegen adds it when it needs to
+disambiguate between two matching names on the live page; that is a judgement this
+generator cannot make after the fact, so widen or tighten the locator by hand if a
+name turns out to be ambiguous.
 
 ## Test-case library
 
@@ -387,6 +663,29 @@ an empty one.
 - No API mocking.
 - Cannot be injected into `chrome://` pages, the Chrome Web Store, or the PDF
   viewer — a Chrome restriction, not something the extension can work around.
+
+## Publishing
+
+`STORE-LISTING.md` holds the Chrome Web Store submission copy: the single-purpose
+statement, descriptions, and a justification for every permission — the part that
+decides whether a submission with `<all_urls>` gets held up. `PRIVACY.md` is the
+privacy policy the store requires once any data category is declared; it needs a
+contact address filled in and a public URL to live at.
+
+Upload `dist/qa-test-case-recorder-<version>-chrome.zip` from `npm run zip`. That
+archive has `manifest.json` at its root, which the store requires — an archive
+with the files inside a folder is rejected.
+
+The icon is generated by `tools/make-icons.mjs`, not drawn by hand, so it stays
+reproducible:
+
+```bash
+node tools/make-icons.mjs public/icon
+```
+
+It renders with 4×4 supersampling, and composes differently per size: the full
+cursor plus the record dot at 32 px and up, and at 16 px a reshaped cursor with a
+wider tail, because the standard tail is one pixel wide there and disappears.
 
 ## Commands
 

@@ -10,6 +10,18 @@ export type StepAction =
   | 'press'
   | 'submit'
   | 'navigate'
+  /**
+   * Scrolling, recorded as an intent rather than a coordinate: the step names an
+   * element to bring into view. `window.scrollTo(0, 1200)` would be a number that
+   * means something different on every viewport and every content length.
+   */
+  | 'scrollTo'
+  /**
+   * Scrolling that *loads* content rather than merely revealing it. Recorded
+   * separately because the generated step is a loop, not a single action: the
+   * test has to keep scrolling until the list stops growing.
+   */
+  | 'scrollToBottom'
   | AssertAction;
 
 /**
@@ -19,6 +31,12 @@ export type StepAction =
  */
 export type AssertAction =
   | 'assertText'
+  /**
+   * "This text is somewhere on the page." Targets the text rather than an
+   * element, so moving the message from an <h2> to a <div> does not break a test
+   * that is checking nothing about the markup.
+   */
+  | 'assertTextPresent'
   | 'assertVisible'
   | 'assertHidden'
   | 'assertValue'
@@ -26,6 +44,7 @@ export type AssertAction =
 
 export const ASSERT_ACTIONS: readonly AssertAction[] = [
   'assertText',
+  'assertTextPresent',
   'assertVisible',
   'assertHidden',
   'assertValue',
@@ -130,6 +149,25 @@ export interface RecordedStep {
    * Absent or empty means the top frame.
    */
   framePath?: FrameRef[];
+  /**
+   * Send the value as individual keystrokes instead of assigning it at once.
+   *
+   * Set automatically when the characters typed do not match the field's final
+   * value — the signature of an input mask. Playwright's `fill()` assigns the
+   * value directly, which a masked field never sees, so it has to be typed.
+   */
+  typeSequentially?: boolean;
+  /**
+   * Transport and bookkeeping only. While a field is being typed into, each
+   * update replaces the previous step instead of appending a new one, so the
+   * panel shows the value growing live rather than nothing until blur.
+   */
+  upsertKey?: string;
+  /**
+   * How many times the action was repeated while recording. Used by
+   * `scrollToBottom`, where the count becomes the loop's upper bound.
+   */
+  repeat?: number;
 }
 
 export type IssueKind =

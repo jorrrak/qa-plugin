@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   exportBlob,
   FORMAT_META,
@@ -6,8 +6,10 @@ import {
   type LocatorStrategy,
   type OutputFormat,
 } from '@/lib/codegen';
-import { requiredVariables } from '@/lib/codegen/shared';
-import { downloadBlob, slugify } from '@/lib/download';
+import { BASE_URL_VARIABLE, requiredVariables } from '@/lib/codegen/shared';
+import { downloadBlob, downloadText, slugify } from '@/lib/download';
+import { toCypressEnvFile, toEnvFile } from '@/lib/export/env';
+import { listVariables, type TestVariable } from '@/lib/variables';
 import type { Session } from '@/lib/types';
 import { Button, EmptyState } from './ui';
 
@@ -21,18 +23,29 @@ export function ScriptTab({ session }: { session: Session }) {
   const [format, setFormat] = useState<OutputFormat>('playwright');
   const [strategy, setStrategy] = useState<LocatorStrategy>('smart');
   const [copied, setCopied] = useState(false);
+  const [variables, setVariables] = useState<TestVariable[]>([]);
+  const [envNote, setEnvNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    void listVariables().then(setVariables);
+  }, []);
+
+  // A defined BASE_URL turns absolute navigations into base-relative ones, so the
+  // same test can run against staging and production.
+  const baseUrl = variables.find((entry) => entry.name === BASE_URL_VARIABLE)?.value;
+
+  const options = useMemo(
+    () => ({ locatorStrategy: strategy, testName: session.title, baseUrl }),
+    [strategy, session.title, baseUrl],
+  );
 
   const code = useMemo(
-    () =>
-      generate([session], format, {
-        locatorStrategy: strategy,
-        testName: session.title,
-      }),
-    [session, format, strategy],
+    () => generate([session], format, options),
+    [session, format, options],
   );
 
   const meta = FORMAT_META[format];
-  const needed = requiredVariables(session.steps);
+  const needed = requiredVariables(session.steps, baseUrl);
 
   if (session.steps.length === 0) {
     return (
@@ -91,10 +104,7 @@ export function ScriptTab({ session }: { session: Session }) {
             onClick={() =>
               downloadBlob(
                 `${slugify(session.title, 'test-case')}.${meta.extension}`,
-                exportBlob([session], format, {
-                  locatorStrategy: strategy,
-                  testName: session.title,
-                }),
+                exportBlob([session], format, options),
               )
             }
           >
@@ -104,9 +114,36 @@ export function ScriptTab({ session }: { session: Session }) {
       </div>
 
       {needed.length > 0 && (
-        <p className="border-b border-slate-200 bg-amber-50/60 px-2 py-1.5 text-[10px] leading-relaxed text-amber-800 dark:border-slate-700 dark:bg-amber-950/30 dark:text-amber-300">
-          Set before running: <code className="font-semibold">{needed.join(', ')}</code>
-        </p>
+        <div className="border-b border-slate-200 bg-amber-50/60 px-2 py-1.5 dark:border-slate-700 dark:bg-amber-950/30">
+          <p className="text-[10px] leading-relaxed text-amber-800 dark:text-amber-300">
+            Set before running: <code className="font-semibold">{needed.join(', ')}</code>
+          </p>
+          <div className="mt-1 flex items-center gap-1.5">
+            <Button
+              onClick={() => {
+                // Cypress reads its own JSON store, not process.env, so the file
+                // it needs is a different one.
+                const file =
+                  format === 'cypress'
+                    ? toCypressEnvFile(needed, variables)
+                    : toEnvFile(needed, variables, session.title);
+                downloadText(file.filename, file.content);
+                setEnvNote(
+                  file.blanks.length
+                    ? `Saved ${file.filename} — fill in ${file.blanks.join(', ')}`
+                    : `Saved ${file.filename}`,
+                );
+              }}
+            >
+              Download {format === 'cypress' ? 'cypress.env.json' : '.env'}
+            </Button>
+            {envNote && (
+              <span className="min-w-0 truncate text-[10px] text-amber-700 dark:text-amber-400">
+                {envNote}
+              </span>
+            )}
+          </div>
+        </div>
       )}
 
       <pre className="flex-1 overflow-auto bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-800 dark:bg-slate-950 dark:text-slate-200">

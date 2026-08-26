@@ -5,6 +5,8 @@ import {
   describeTarget,
   frameSelector,
   indent,
+  missingNavigationNote,
+  relativeToBase,
   js,
   requiredVariables,
   unresolvedFrameNote,
@@ -64,14 +66,70 @@ function rootedLocator(
   return { code: `${frame}.${chained}`, warnings };
 }
 
+/**
+ * Cypress spells keys as `{enter}` and modifiers as `{ctrl}`, and a combination
+ * is written as the modifiers followed by the key — `{ctrl}a`, not `{ctrl+a}`.
+ */
+function cypressKeys(key: string): string {
+  const MODIFIERS: Record<string, string> = {
+    Control: '{ctrl}',
+    Meta: '{cmd}',
+    Alt: '{alt}',
+    Shift: '{shift}',
+  };
+  const parts = key.split('+');
+  const base = parts.pop() ?? 'Enter';
+  const prefix = parts.map((m) => MODIFIERS[m] ?? '').join('');
+  // The letter must stay lowercase. Typing an uppercase letter in Cypress implies
+  // Shift, so `{ctrl}A` would send Ctrl+Shift+A; Shift is expressed as `{shift}`.
+  return prefix + (base.length === 1 ? base.toLowerCase() : `{${base.toLowerCase()}}`);
+}
+
 function statement(step: RecordedStep, options: CodegenOptions): string[] {
   const lines: string[] = [];
   if (step.note) lines.push(`// ${step.note}`);
 
   if (step.action === 'navigate') {
-    lines.push(`cy.visit(${js(step.value ?? step.url)});`);
+    const url = step.value ?? step.url;
+    const path = relativeToBase(url, options.baseUrl);
+    lines.push(
+      path
+        ? `cy.visit(Cypress.env("BASE_URL") + ${js(path)});`
+        : `cy.visit(${js(url)});`,
+    );
     return lines;
   }
+  if (step.action === 'scrollToBottom') {
+    const rounds = step.repeat ?? 1;
+    // Cypress queues commands rather than running them inline, so a
+    // "stop when it stops growing" loop is not expressible here. The recorded
+    // count is repeated instead, which is exactly what the tester did.
+    lines.push(
+      `// Load more by scrolling, ${rounds} round(s) as recorded.`,
+      `Cypress._.times(${rounds}, () => {`,
+      `  cy.scrollTo('bottom');`,
+      `  cy.wait(600);`,
+      `});`,
+    );
+    return lines;
+  }
+
+  if (step.action === 'assertTextPresent') {
+    const path = step.framePath ?? [];
+    // cy.contains yields the first match on its own, so no .first() is needed.
+    const root =
+      path.length === 1
+        ? `cy.iframe(${js(frameSelector(path[0]!, options))}).contains(`
+        : 'cy.contains(';
+    if (path.length > 1) {
+      lines.push(
+        `// FIXME: ${path.length} nested iframes — cypress-iframe handles one level only.`,
+      );
+    }
+    lines.push(`${root}${js(step.value ?? '')}).should("be.visible");`);
+    return lines;
+  }
+
   if (step.action === 'assertUrl') {
     lines.push(`cy.url().should("eq", ${js(step.value ?? '')});`);
     return lines;
@@ -122,6 +180,9 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
     case 'select':
       lines.push(`${loc}.select(${cypressValueExpr(step).expr});`);
       break;
+    case 'scrollTo':
+      lines.push(`${loc}.scrollIntoView();`);
+      break;
     case 'check':
       lines.push(`${loc}.check();`);
       break;
@@ -129,7 +190,7 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
       lines.push(`${loc}.uncheck();`);
       break;
     case 'press':
-      lines.push(`${loc}.type(${js(`{${(step.key ?? 'Enter').toLowerCase()}}`)});`);
+      lines.push(`${loc}.type(${js(cypressKeys(step.key ?? 'Enter'))});`);
       break;
     case 'submit':
       lines.push(`${loc}.type("{enter}");`);
@@ -158,7 +219,10 @@ export function toCypress(sessions: Session[], options: CodegenOptions): string 
     session.steps.some((step) => (step.framePath?.length ?? 0) > 0),
   );
 
-  const needed = requiredVariables(sessions.flatMap((session) => session.steps));
+  const needed = requiredVariables(
+    sessions.flatMap((session) => session.steps),
+    options.baseUrl,
+  );
   const envNote = needed.length
     ? `// Required Cypress env values (cypress.env.json or CYPRESS_* in the shell):\n${needed
         .map((n) => `//   ${n}`)
@@ -178,7 +242,11 @@ export function toCypress(sessions: Session[], options: CodegenOptions): string 
   const header = plugins.length ? `${plugins.join('\n')}\n\n` : '';
 
   const tests = sessions.map((session) => {
-    const body = session.steps.flatMap((step) => statement(step, options));
+    const warning = missingNavigationNote(session.steps);
+    const body = [
+      ...(warning ? [`// ${warning}`] : []),
+      ...session.steps.flatMap((step) => statement(step, options)),
+    ];
     const name = session.title || options.testName;
     return `  it(${js(name)}, () => {\n${indent(body, 4)}\n  });`;
   });

@@ -12,7 +12,10 @@ const ACTION_LABEL: Record<RecordedStep['action'], string> = {
   press: 'Press',
   submit: 'Submit',
   navigate: 'Go to',
-  assertText: 'Assert text',
+  scrollTo: 'Scroll to',
+  scrollToBottom: 'Scroll to load more',
+  assertText: 'Assert element text',
+  assertTextPresent: 'Assert text on page',
   assertValue: 'Assert value',
   assertVisible: 'Assert visible',
   assertHidden: 'Assert hidden',
@@ -73,6 +76,9 @@ function StepCard({
             {target && <Badge>{KIND_LABEL[target.elementKind] ?? target.elementKind}</Badge>}
             {target && !target.unique && <Badge tone="amber">ambiguous locator</Badge>}
             {step.sensitive && <Badge tone="emerald">password — not stored</Badge>}
+            {step.typeSequentially && (
+              <Badge tone="amber" >typed key by key</Badge>
+            )}
             {frameLabel(step) && (
               <Badge tone={step.framePath?.some((f) => f.unresolved) ? 'red' : 'amber'}>
                 {frameLabel(step)}

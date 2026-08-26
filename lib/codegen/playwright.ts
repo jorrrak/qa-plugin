@@ -5,6 +5,8 @@ import {
   describeTarget,
   frameSelector,
   indent,
+  missingNavigationNote,
+  relativeToBase,
   js,
   requiredVariables,
   valueExpr,
@@ -51,7 +53,43 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
   if (step.note) lines.push(`// ${step.note}`);
 
   if (step.action === 'navigate') {
-    lines.push(`await page.goto(${js(step.value ?? step.url)});`);
+    const url = step.value ?? step.url;
+    const path = relativeToBase(url, options.baseUrl);
+    lines.push(
+      path
+        ? `await page.goto(process.env.BASE_URL + ${js(path)});`
+        : `await page.goto(${js(url)});`,
+    );
+    return lines;
+  }
+
+  if (step.action === 'scrollToBottom') {
+    // The recorded count is the bound, not the exact number: the same list can
+    // load a different amount on a different day. The height check is what
+    // actually ends the loop, so a short run still works and a long one does not
+    // spin forever.
+    const rounds = Math.max(2, (step.repeat ?? 1) + 2);
+    lines.push(
+      `// Load more by scrolling. Recorded ${step.repeat ?? 1} round(s); stops early once the list stops growing.`,
+      `let previousHeight = 0;`,
+      `for (let round = 0; round < ${rounds}; round += 1) {`,
+      `  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));`,
+      `  await page.waitForTimeout(600);`,
+      `  const height = await page.evaluate(() => document.body.scrollHeight);`,
+      `  if (height === previousHeight) break;`,
+      `  previousHeight = height;`,
+      `}`,
+    );
+    return lines;
+  }
+
+  if (step.action === 'assertTextPresent') {
+    // `.first()` is not laziness: getByText can match several nodes, and
+    // Playwright's strict mode turns that into a confusing "strict mode
+    // violation" rather than a useful assertion failure.
+    lines.push(
+      `await expect(${scope(step, options)}.getByText(${js(step.value ?? '')}).first()).toBeVisible();`,
+    );
     return lines;
   }
 
@@ -88,7 +126,16 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
       lines.push(`await ${loc}.dblclick();`);
       break;
     case 'fill':
-      lines.push(`await ${loc}.fill(${valueExpr(step, 'js')});`);
+      // pressSequentially is the only way a masked or autocompleting field sees
+      // the keystrokes it reacts to; fill() assigns the value and bypasses them.
+      lines.push(
+        step.typeSequentially
+          ? `await ${loc}.pressSequentially(${valueExpr(step, 'js')});`
+          : `await ${loc}.fill(${valueExpr(step, 'js')});`,
+      );
+      break;
+    case 'scrollTo':
+      lines.push(`await ${loc}.scrollIntoViewIfNeeded();`);
       break;
     case 'select':
       lines.push(`await ${loc}.selectOption(${valueExpr(step, 'js')});`);
@@ -133,13 +180,20 @@ export function toPlaywright(sessions: Session[], options: CodegenOptions): stri
 
   // Stating the required variables up front saves the reader from discovering
   // them one failed run at a time.
-  const needed = requiredVariables(sessions.flatMap((session) => session.steps));
+  const needed = requiredVariables(
+    sessions.flatMap((session) => session.steps),
+    options.baseUrl,
+  );
   const header = needed.length
     ? `// Required environment variables:\n${needed.map((n) => `//   ${n}`).join('\n')}\n\n`
     : '';
 
   const tests = sessions.map((session) => {
-    const body = session.steps.flatMap((step) => statement(step, options));
+    const warning = missingNavigationNote(session.steps);
+    const body = [
+      ...(warning ? [`// ${warning}`] : []),
+      ...session.steps.flatMap((step) => statement(step, options)),
+    ];
 
     // Errors seen while recording are carried into the file as comments rather
     // than as assertions: turning a bug into a passing assertion would freeze it.

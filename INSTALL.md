@@ -1,4 +1,4 @@
-# QA Plugin — install
+# QA Test Case Recorder — install
 
 A Chrome extension for QA: record test cases with XPath and the element's visible
 name, generate automation scripts, and catch bugs as they happen.
@@ -7,7 +7,7 @@ name, generate automation scripts, and catch bugs as they happen.
 
 Chrome cannot install a `.zip` directly — it only loads an unpacked folder. So:
 
-1. **Unzip** this archive somewhere permanent, e.g. `~/Documents/qa-plugin-extension`.
+1. **Unzip** this archive somewhere permanent, e.g. `~/Documents/QA test case recorder`.
    Do not leave it in Downloads: if the folder moves later, Chrome treats it as a
    different extension and your saved test cases stop showing up.
 2. Open `chrome://extensions` in Chrome.
@@ -15,7 +15,7 @@ Chrome cannot install a `.zip` directly — it only loads an unpacked folder. So
 4. Click **Load unpacked** and select the unzipped folder — the one containing
    `manifest.json`.
 5. Pin the icon: click the puzzle-piece icon next to the address bar, then the
-   pin next to **QA Plugin**.
+   pin next to **QA Test Case Recorder**.
 
 Click the toolbar icon to open the side panel.
 

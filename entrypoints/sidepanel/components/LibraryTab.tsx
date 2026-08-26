@@ -17,7 +17,9 @@ import {
   saveTestCase,
   type SavedTestCase,
 } from '@/lib/library';
+import { BASE_URL_VARIABLE } from '@/lib/codegen/shared';
 import { buildLibraryFile, parseLibraryFile } from '@/lib/library-file';
+import { listVariables, type TestVariable } from '@/lib/variables';
 import type { Session } from '@/lib/types';
 import { Badge, Button, EmptyState } from './ui';
 
@@ -34,12 +36,18 @@ export function LibraryTab({ session }: { session: Session | null }) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [bytes, setBytes] = useState(0);
+  const [variables, setVariables] = useState<TestVariable[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
-    const [entries, used] = await Promise.all([listTestCases(), libraryBytes()]);
+    const [entries, used, vars] = await Promise.all([
+      listTestCases(),
+      libraryBytes(),
+      listVariables(),
+    ]);
     setCases(entries);
     setBytes(used);
+    setVariables(vars);
   }, []);
 
   useEffect(() => {
@@ -47,7 +55,11 @@ export function LibraryTab({ session }: { session: Session | null }) {
   }, [refresh]);
 
   const meta = FORMAT_META[format];
-  const options = { locatorStrategy: strategy, testName: 'recorded flow' };
+  const options = {
+    locatorStrategy: strategy,
+    testName: 'recorded flow',
+    baseUrl: variables.find((entry) => entry.name === BASE_URL_VARIABLE)?.value,
+  };
 
   function downloadOne(entry: SavedTestCase) {
     downloadBlob(

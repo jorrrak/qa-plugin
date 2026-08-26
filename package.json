@@ -1,6 +1,6 @@
 {
-  "name": "qa-plugin",
-  "version": "0.2.0",
+  "name": "qa-test-case-recorder",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "QA toolkit Chrome extension: test-case recorder, script codegen, bug detection",

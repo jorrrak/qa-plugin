@@ -4,3 +4,4 @@ dist/
 stats.html
 *.zip
 .DS_Store
+.claude/

@@ -1,12 +1,17 @@
+import { xpathLiteral } from '../selector-engine/xpath';
 import { EXACT_TEXT_LIMIT, type RecordedStep, type Session, type TargetInfo } from '../types';
 import {
   commentOut,
   describeTarget,
   frameSelector,
   indent,
+  missingNavigationNote,
+  relativeToBase,
   py,
+  pythonIdentifier,
   requiredVariables,
   samePath,
+  uniqueIdentifier,
   valueExpr,
   unresolvedFrameNote,
   type CodegenOptions,
@@ -50,6 +55,11 @@ function frameSwitch(step: RecordedStep, options: CodegenOptions): string[] {
   return lines;
 }
 
+/** Selenium's Keys constants are SCREAMING_SNAKE: ArrowLeft -> ARROW_LEFT. */
+function seleniumKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase();
+}
+
 function statement(step: RecordedStep, options: CodegenOptions): string[] {
   const lines: string[] = [];
   if (step.note) lines.push(`# ${step.note}`);
@@ -65,9 +75,53 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
   }
 
   if (step.action === 'navigate') {
-    lines.push(`driver.get(${py(step.value ?? step.url)})`);
+    const url = step.value ?? step.url;
+    const path = relativeToBase(url, options.baseUrl);
+    lines.push(
+      path
+        ? `driver.get(os.environ["BASE_URL"] + ${py(path)})`
+        : `driver.get(${py(url)})`,
+    );
     return lines;
   }
+  if (step.action === 'scrollToBottom') {
+    const rounds = Math.max(2, (step.repeat ?? 1) + 2);
+    lines.push(
+      `# Load more by scrolling. Recorded ${step.repeat ?? 1} round(s); stops early once the list stops growing.`,
+      `_previous_height = 0`,
+      `for _ in range(${rounds}):`,
+      `    driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")`,
+      `    time.sleep(0.6)`,
+      `    _height = driver.execute_script("return document.body.scrollHeight")`,
+      `    if _height == _previous_height:`,
+      `        break`,
+      `    _previous_height = _height`,
+    );
+    return lines;
+  }
+
+  if (step.action === 'assertTextPresent') {
+    // The text ends up inside an XPath literal inside a Python literal, so it
+    // needs XPath quoting first — `py()` alone would produce a valid Python
+    // string containing a broken XPath.
+    const literal = xpathLiteral(step.value ?? '');
+    if (!literal) {
+      lines.push(
+        `# FIXME: the expected text contains both quote characters, which XPath 1.0`,
+        `#        cannot express in one literal. Assert it by another means:`,
+        `#        ${(step.value ?? '').slice(0, 80)}`,
+      );
+      return lines;
+    }
+    // `text()[contains(...)]` matches only elements holding the text directly.
+    // `contains(., ...)` would also match <html> and <body>, which always pass.
+    const xpath = `//*[text()[contains(normalize-space(.), ${literal})]]`;
+    lines.push(
+      `wait.until(EC.visibility_of_element_located((By.XPATH, ${py(xpath)})))`,
+    );
+    return lines;
+  }
+
   if (step.action === 'assertUrl') {
     lines.push(`assert driver.current_url == ${py(step.value ?? '')}, driver.current_url`);
     return lines;
@@ -97,9 +151,34 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
       );
       break;
     case 'press':
-    case 'submit':
+    case 'submit': {
+      const key = step.key ?? 'Enter';
+      const parts = key.split('+');
+      const base = parts.pop() ?? 'Enter';
+      if (parts.length > 0) {
+        // A held modifier cannot be expressed with send_keys alone.
+        lines.push(`_el = ${findExpr(step.target, options, false)}`);
+        const chain = parts.map((m) => `.key_down(Keys.${m.toUpperCase()})`).join('');
+        const release = parts
+          .slice()
+          .reverse()
+          .map((m) => `.key_up(Keys.${m.toUpperCase()})`)
+          .join('');
+        const send = base.length === 1 ? py(base.toLowerCase()) : `Keys.${seleniumKey(base)}`;
+        lines.push('_el.click()  # focus the element the keys are sent to');
+        lines.push(`ActionChains(driver)${chain}.send_keys(${send})${release}.perform()`);
+      } else {
+        lines.push(
+          `${findExpr(step.target, options, false)}.send_keys(Keys.${seleniumKey(base)})`,
+        );
+      }
+      break;
+    }
+    case 'scrollTo':
+      // scroll_to_element exists only on newer Selenium; the script form works
+      // everywhere and is what most suites already use.
       lines.push(
-        `${findExpr(step.target, options, false)}.send_keys(Keys.${(step.key ?? 'ENTER').toUpperCase()})`,
+        `driver.execute_script("arguments[0].scrollIntoView({block: 'center'})", ${findExpr(step.target, options, false)})`,
       );
       break;
     case 'assertText': {
@@ -131,43 +210,33 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
   return lines;
 }
 
-/**
- * A Python identifier can only hold ASCII here, so a non-Latin title (Persian,
- * Arabic, Cyrillic) slugs down to nothing. Falling back to the position keeps the
- * names distinct and ordered, and the real title is preserved as a docstring.
- */
-function pythonName(title: string, index: number): string {
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!slug || /^\d/.test(slug)) return `case_${index + 1}`;
-  return slug;
-}
-
 export function toSeleniumPython(sessions: Session[], options: CodegenOptions): string {
-  const needed = requiredVariables(sessions.flatMap((session) => session.steps));
+  const needed = requiredVariables(
+    sessions.flatMap((session) => session.steps),
+    options.baseUrl,
+  );
   const needsOs = needed.length > 0;
+  const needsTime = sessions.some((session) =>
+    session.steps.some((step) => step.action === 'scrollToBottom'),
+  );
   const header = needsOs
     ? `# Required environment variables:\n${needed.map((n) => `#   ${n}`).join('\n')}\n`
     : '';
 
   const seen = new Set<string>();
   const functions = sessions.map((session, index) => {
-    const base = pythonName(session.title, index);
+    const base = pythonIdentifier(session.title, index);
     // Two test cases with the same title would collide into one function and the
     // second would silently shadow the first.
-    let name = base;
-    let suffix = 2;
-    while (seen.has(name)) name = `${base}_${suffix++}`;
-    seen.add(name);
+    const name = uniqueIdentifier(base, seen);
 
     // The title may be unrepresentable in the identifier, so it lives here.
     const docstring = session.title ? `    """${session.title.replace(/"/g, "'")}"""\n` : '';
     // Emit a frame switch only when the frame actually changes, so a run of
     // steps inside one iframe does not repeat four lines of boilerplate.
+    const warning = missingNavigationNote(session.steps);
     let currentPath: RecordedStep['framePath'] = [];
-    const body = session.steps.flatMap((step) => {
+    const stepLines = session.steps.flatMap((step) => {
       if (step.action === 'navigate') {
         currentPath = [];
         return statement(step, options);
@@ -180,6 +249,7 @@ export function toSeleniumPython(sessions: Session[], options: CodegenOptions): 
       currentPath = step.framePath ?? [];
       return [...prefix, ...statement(step, options)];
     });
+    const body = warning ? [`# ${warning}`, ...stepLines] : stepLines;
 
     return `def test_${name}():
 ${docstring}    driver = webdriver.Chrome()
@@ -190,7 +260,7 @@ ${indent(body, 8)}
         driver.quit()`;
   });
 
-  return `${header}${needsOs ? 'import os\n' : ''}from selenium import webdriver
+  return `${header}${needsOs ? 'import os\n' : ''}${needsTime ? 'import time\n' : ''}from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains

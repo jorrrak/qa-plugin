@@ -112,6 +112,7 @@ export function toYamlDocument(root: { [key: string]: YamlValue }): string {
 
 const ACTION_LABEL: Record<string, string> = {
   assertText: 'assertText',
+  assertTextPresent: 'assertTextPresent',
   assertValue: 'assertValue',
   assertVisible: 'assertVisible',
   assertHidden: 'assertHidden',
@@ -196,7 +197,7 @@ function testCaseOf(session: Session): YamlValue {
 
 export function toYaml(sessions: Session[]): string {
   const header = [
-    '# QA Plugin — recorded test cases',
+    '# QA Test Case Recorder — recorded test cases',
     '# Generated export. Edit the source recording rather than this file:',
     '# re-exporting overwrites it.',
     '',
