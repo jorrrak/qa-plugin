@@ -6,6 +6,7 @@ import { StepList } from './components/StepList';
 import { ToolsTab } from './components/ToolsTab';
 import { Badge, Button } from './components/ui';
 import { isAssertion } from '@/lib/types';
+import { isRecordableUrl, shortUrl } from '@/lib/url';
 import { useSession } from './use-session';
 
 type TabKey = 'record' | 'script' | 'library' | 'issues' | 'tools';
@@ -19,7 +20,7 @@ const TABS: { key: TabKey; label: string }[] = [
 ];
 
 export function App() {
-  const { tabId, session, act } = useSession();
+  const { tabId, url, session, act } = useSession();
   const [tab, setTab] = useState<TabKey>('record');
   const [renaming, setRenaming] = useState(false);
 
@@ -27,6 +28,10 @@ export function App() {
   const errorCount = session?.issues.filter((i) => i.severity === 'error').length ?? 0;
   const assertionCount =
     session?.steps.filter((step) => isAssertion(step.action)).length ?? 0;
+  // A tester needs to see what the recording will open before pressing record.
+  // Without it a chrome:// tab, the Web Store or a PDF viewer looked identical
+  // to a normal page, and recording there fails silently.
+  const recordable = isRecordableUrl(url);
 
   return (
     <div className="flex h-full flex-col bg-slate-50 font-sans text-slate-900 dark:bg-slate-900 dark:text-slate-100">
@@ -58,6 +63,22 @@ export function App() {
           </button>
         )}
 
+        {recordable ? (
+          <p
+            dir="ltr"
+            title={url}
+            className="truncate font-mono text-[11px] text-slate-500 dark:text-slate-400"
+          >
+            {shortUrl(url)}
+          </p>
+        ) : (
+          <p className="text-[11px] text-amber-600 dark:text-amber-400">
+            {url
+              ? 'This page cannot be recorded — Chrome blocks extensions on it. Open an http(s) page.'
+              : 'No page selected.'}
+          </p>
+        )}
+
         <div className="flex items-center gap-1.5">
           {recording ? (
             <Button
@@ -69,7 +90,7 @@ export function App() {
           ) : (
             <Button
               variant="primary"
-              disabled={tabId == null}
+              disabled={tabId == null || !recordable}
               onClick={() => tabId != null && void act({ type: 'startRecording', tabId })}
             >
               ● Start recording

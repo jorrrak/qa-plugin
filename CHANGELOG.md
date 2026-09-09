@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.1
+
+Hotfix: a recording could come out with no `goto` in it.
+
+- **Resuming a recording never recorded where it resumed.** The opening
+  navigation was added only to a session with no steps yet — so the ordinary
+  workflow of stop, walk to another page, start again produced a script whose
+  second half ran against whatever page the first half had ended on. The test is
+  now "is the flow already on this page", read from the last step's own URL,
+  rather than "is this session new". A goto added mid-flow is commented
+  `Recording resumed on this page` so it does not read like a mistake.
+- **A tab that was still loading recorded no opening URL at all.** Chrome leaves
+  `tab.url` empty until the navigation commits and holds the destination in
+  `tab.pendingUrl`; only the first was read. Pressing record while the page comes
+  up is normal, and it produced a recording that started nowhere.
+- **The panel now names the page it is pointed at**, under the test-case title.
+  On a page Chrome blocks extensions from — `chrome://`, the Web Store, a PDF —
+  it says so and disables the record button, instead of recording nothing and
+  explaining nothing.
+
 ## 0.9.0
 
 - **Fixed: scrolling a container was never recorded.** The recorder measured

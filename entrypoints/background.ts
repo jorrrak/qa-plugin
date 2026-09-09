@@ -16,6 +16,7 @@ import {
   updateStep,
 } from '@/lib/session-store';
 import type { AssertAction, Session } from '@/lib/types';
+import { isRecordableUrl, sameLocation } from '@/lib/url';
 import { listVariables } from '@/lib/variables';
 
 /** Right-click entries the tester uses to add a check mid-recording. */
@@ -145,9 +146,14 @@ async function ensureInjected(tabId: number): Promise<void> {
   }
 }
 
-/** Only a page the generated script could actually open. */
-function isRecordableUrl(url: string | undefined): url is string {
-  return !!url && /^https?:\/\//.test(url);
+/**
+ * Where the flow stands, as far as the recorded steps say: every step carries the
+ * `location.href` it happened at, and a navigation carries its destination.
+ */
+function currentPageOf(session: Session): string | undefined {
+  const last = session.steps[session.steps.length - 1];
+  if (!last) return undefined;
+  return last.action === 'navigate' ? (last.value ?? last.url) : last.url;
 }
 
 /**
@@ -157,21 +163,31 @@ function isRecordableUrl(url: string | undefined): url is string {
  * recording — so the normal workflow, open the page and then press record,
  * produced a script with no `goto` at all. It would start on a blank page and
  * fail on its first click, with nothing in the output hinting at why.
+ *
+ * The test is not "is this a fresh session" but "is the flow already on this
+ * page". Those are different in the case that matters most: a tester stops,
+ * walks to another page, and presses record again — which is the whole reason
+ * to stop. Keyed on freshness, the second half of the flow was generated with
+ * no goto and ran against whatever page the first half had ended on.
  */
 async function recordOpeningUrl(tabId: number, current: Session): Promise<Session> {
-  // Only at the start of a fresh recording. Resuming one that already has steps
-  // must not splice a navigation into the middle of the flow.
-  if (current.steps.length > 0) return current;
-
   const tab = await chrome.tabs.get(tabId).catch(() => undefined);
-  if (!isRecordableUrl(tab?.url)) return current;
+  // A tab that is still loading reports an empty `url` and keeps its destination
+  // in `pendingUrl`. Pressing record while the page comes up is normal, and it
+  // used to produce a recording with no opening navigation at all.
+  const url = isRecordableUrl(tab?.url) ? tab.url : tab?.pendingUrl;
+  if (!isRecordableUrl(url)) return current;
+
+  if (sameLocation(currentPageOf(current), url)) return current;
 
   return appendStep(tabId, {
     id: uid('step'),
     action: 'navigate',
-    value: tab.url,
-    url: tab.url,
+    value: url,
+    url,
     timestamp: Date.now(),
+    // A goto in the middle of a flow reads like a mistake without this.
+    note: current.steps.length > 0 ? 'Recording resumed on this page' : undefined,
   });
 }
 

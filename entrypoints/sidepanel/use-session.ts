@@ -9,11 +9,16 @@ import type { Session } from '@/lib/types';
 export function useSession() {
   const [tabId, setTabId] = useState<number | null>(null);
   const [session, setSession] = useState<Session | null>(null);
+  /** The page the panel is pointed at, so the header can name what will be recorded. */
+  const [url, setUrl] = useState<string | undefined>(undefined);
 
   const load = useCallback(async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab?.id == null) return;
     setTabId(tab.id);
+    // pendingUrl while the page is still coming up — the same value the
+    // background records, so the header never promises a different one.
+    setUrl(tab.url || tab.pendingUrl);
     const loaded = await sendMessage({ type: 'getSession', tabId: tab.id });
     if (loaded) setSession(loaded);
   }, []);
@@ -23,7 +28,9 @@ export function useSession() {
 
     const onActivated = () => void load();
     const onUpdated = (_id: number, info: chrome.tabs.OnUpdatedInfo) => {
-      if (info.status === 'complete') void load();
+      // Also on the URL change, not only on `complete`: the header would
+      // otherwise name the previous page for the whole of a slow load.
+      if (info.status === 'complete' || info.url) void load();
     };
     const onBroadcast = (message: Message) => {
       if (message.type !== 'sessionChanged') return;
@@ -52,5 +59,5 @@ export function useSession() {
     if (updated) setSession(updated);
   }, []);
 
-  return { tabId, session, act, reload: load };
+  return { tabId, url, session, act, reload: load };
 }

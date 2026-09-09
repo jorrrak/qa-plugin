@@ -96,9 +96,26 @@ happens *while* recording, so the normal workflow — open the page, then press
 record — produced a script with no `goto` at all. It started on a blank page and
 failed on its first click, with nothing in the output pointing at the cause.
 
-Recordings saved before this behaviour existed still have no navigation step. For
-those, the generated script now opens with a `FIXME` naming the page it was
-recorded on, rather than failing silently.
+The condition is **"is the flow already on this page"**, not "is this session
+new" — read from the URL the last recorded step carries. Those differ in the case
+that matters most: a tester stops, walks to another page, and records again,
+which is the whole reason to stop. Keyed on newness, that second recording got no
+`goto`, and the script's second half ran against whatever page the first half had
+ended on. A navigation added mid-flow is commented `Recording resumed on this
+page`, so it does not read as a mistake.
+
+A tab that is still loading reports an empty `url` and keeps its destination in
+`pendingUrl`; both are read, because pressing record while the page comes up is
+ordinary and used to produce a recording that started nowhere.
+
+The panel header names the page it is pointed at, so what will be recorded is
+visible before recording starts. On a page Chrome blocks extensions from —
+`chrome://`, the Web Store, a PDF viewer — it says so and disables the record
+button. Recording there is impossible, and it used to fail silently.
+
+Recordings saved before any of this existed still have no navigation step. For
+those, the generated script opens with a `FIXME` naming the page it was recorded
+on, rather than failing silently.
 
 
 Clicks, double-clicks (a pending click is held for 220ms so a double-click can
