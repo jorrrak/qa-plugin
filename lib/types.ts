@@ -17,6 +17,14 @@ export type StepAction =
    */
   | 'scrollTo'
   /**
+   * The fallback for a scroll over content nothing can name — an image grid, a
+   * map, a chart. A pixel offset is genuinely worse than an element, for the
+   * reason above, but it is much better than the silence this replaces: the
+   * tester scrolled, the recording said nothing, and the generated script then
+   * clicked something that had never been rendered.
+   */
+  | 'scrollPosition'
+  /**
    * Scrolling that *loads* content rather than merely revealing it. Recorded
    * separately because the generated step is a loop, not a single action: the
    * test has to keep scrolling until the list stops growing.
@@ -57,6 +65,9 @@ export function isAssertion(action: StepAction): action is AssertAction {
 
 /** Text longer than this is asserted with "contains" rather than equality. */
 export const EXACT_TEXT_LIMIT = 60;
+
+/** Bound on one test case, so a runaway page cannot fill up extension storage. */
+export const MAX_STEPS = 500;
 
 export type ElementKind =
   | 'button'
@@ -168,6 +179,30 @@ export interface RecordedStep {
    * `scrollToBottom`, where the count becomes the loop's upper bound.
    */
   repeat?: number;
+  /**
+   * Pixel offset for `scrollPosition`. Read together with `target`: with one, it
+   * is that container's `scrollTop`; without, the window's `scrollY`.
+   */
+  scrollOffset?: number;
+  /**
+   * The scrollable element a scroll step happened in, when it was not the page
+   * itself. Half the web scrolls a `div` under a fixed header rather than the
+   * document, and a step that ignores that scrolls the wrong thing.
+   */
+  scrollContainer?: TargetInfo;
+}
+
+/**
+ * The fields the panel is allowed to change on a recorded step.
+ *
+ * Deliberately not `Partial<RecordedStep>`: a locator, a frame path and a
+ * timestamp are records of what happened, and letting the panel rewrite them
+ * would turn "edit this test case" into "fabricate a recording".
+ */
+export interface StepPatch {
+  value?: string;
+  key?: string;
+  note?: string;
 }
 
 export type IssueKind =

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.0
+
+- **Fixed: scrolling a container was never recorded.** The recorder measured
+  every scroll against `window.scrollY`. On a page that scrolls a `div` under a
+  fixed header — which is half of them — the events arrived, the offset never
+  moved, and the whole burst was discarded as too small to matter. Each scroll
+  step now measures the element that actually scrolled and records which one it
+  was; the load-more loop and the positional step target that element rather than
+  the window. Reproduced in a browser against a real scrolling container before
+  and after.
+- **Fixed: a scroll over unnameable content recorded nothing.** On an image grid,
+  a map or a chart there is no element in view worth a locator, and the step was
+  silently dropped — so the script went on to click something the page had not
+  lazily rendered. Those scrolls are now recorded as `scrollPosition`, a pixel
+  offset carrying a note saying why. A visibly poor step beats a missing one.
+- **Fixed: a scroll right after a click was suppressed.** Scrolling within 700ms
+  of a recorded action is ignored because clicks and navigations scroll the page
+  themselves — but that also ate the tester's own scroll. A wheel or touch gesture
+  now overrides the suppression: the page can scroll itself, but it cannot fake
+  the gesture.
+- **Editing a recorded test case.** ✎ on any step opens an editor: insert an
+  assertion after it (element assertions reuse that step's locator and iframe),
+  change a value or a note, reorder with ↑ / ↓. Steps renumber by position. A
+  password or variable step still refuses a typed-in value, enforced in the store
+  rather than only in the UI.
+- Two `scrollToBottom` steps in one Playwright/TypeScript flow declared
+  `previousHeight` twice in the same scope. The loop is now block-scoped.
+
 ## 0.8.0
 
 - **Infinite scroll.** A scroll that settles near the bottom is checked 900ms

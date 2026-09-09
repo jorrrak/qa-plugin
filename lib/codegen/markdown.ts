@@ -16,6 +16,7 @@ const ACTION_LABEL: Record<string, string> = {
   submit: 'Submit',
   navigate: 'Go to',
   scrollTo: 'Scroll to',
+  scrollPosition: 'Scroll to position',
   scrollToBottom: 'Scroll to load more',
   assertText: 'Assert element text',
   assertTextPresent: 'Assert text on page',
@@ -33,6 +34,8 @@ const ACTION_LABEL: Record<string, string> = {
 function valueCell(step: Session['steps'][number]): string {
   if (step.variable) return `\`\${${step.variable}}\``;
   if (step.sensitive) return '`<password>`';
+  // A positional scroll has no value of its own; the offset is the whole step.
+  if (step.action === 'scrollPosition') return `${step.scrollOffset ?? 0} px`;
   return cell(step.value);
 }
 
@@ -45,7 +48,9 @@ function frameCell(step: Session['steps'][number]): string {
 
 function sectionFor(session: Session, level: string): string {
   const rows = session.steps.map((step) => {
-    const t = step.target;
+    // A scroll that moved a container names the container, so the row is not
+    // three empty cells and a pixel count.
+    const t = step.target ?? step.scrollContainer;
     return `| ${step.seq} | ${ACTION_LABEL[step.action] ?? step.action} | ${cell(
       t?.textName,
     )} | ${cell(t?.elementKind)} | ${frameCell(step)} | \`${cell(t?.xpath ?? step.value)}\` | ${valueCell(step)} |`;

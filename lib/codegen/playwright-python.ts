@@ -59,6 +59,20 @@ function scope(step: RecordedStep, options: CodegenOptions): string {
   );
 }
 
+/**
+ * The scrollable container a scroll step happened in, when it was not the page.
+ * Built from the same locator machinery as any other element — it is only ever
+ * a different field on the step.
+ */
+function containerLocator(
+  step: RecordedStep,
+  options: CodegenOptions,
+): string | undefined {
+  return step.scrollContainer
+    ? locator({ ...step, target: step.scrollContainer }, options)
+    : undefined;
+}
+
 function gotoExpression(step: RecordedStep, options: CodegenOptions): string {
   const url = step.value ?? step.url;
   const path = relativeToBase(url, options.baseUrl);
@@ -74,15 +88,31 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
     return lines;
   }
 
+  if (step.action === 'scrollPosition') {
+    const y = step.scrollOffset ?? 0;
+    const container = containerLocator(step, options);
+    lines.push(
+      container
+        ? `${container}.evaluate("el => el.scrollTop = ${y}")`
+        : `page.evaluate("window.scrollTo(0, ${y})")`,
+    );
+    return lines;
+  }
+
   if (step.action === 'scrollToBottom') {
     const rounds = Math.max(2, (step.repeat ?? 1) + 2);
+    const container = containerLocator(step, options);
     lines.push(
       `# Load more by scrolling. Recorded ${step.repeat ?? 1} round(s); stops early once the list stops growing.`,
       `previous_height = 0`,
       `for _ in range(${rounds}):`,
-      `    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")`,
+      container
+        ? `    ${container}.evaluate("el => el.scrollTop = el.scrollHeight")`
+        : `    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")`,
       `    page.wait_for_timeout(600)`,
-      `    height = page.evaluate("document.body.scrollHeight")`,
+      container
+        ? `    height = ${container}.evaluate("el => el.scrollHeight")`
+        : `    height = page.evaluate("document.body.scrollHeight")`,
       `    if height == previous_height:`,
       `        break`,
       `    previous_height = height`,

@@ -16,6 +16,12 @@ interface ProbeReport {
   stack?: string;
 }
 
+/** What a scroll event scrolled: `null` is the page, an element is a container. */
+type Scroller = Element | null;
+
+/** Steps that are themselves scrolling, and so must not suppress the next scroll. */
+const SCROLL_ACTIONS = new Set<StepAction>(['scrollTo', 'scrollPosition', 'scrollToBottom']);
+
 function isProbeReport(data: unknown): data is ProbeReport {
   return (
     typeof data === 'object' &&
@@ -51,7 +57,7 @@ export default defineContentScript({
     function emit(step: Omit<RecordedStep, 'seq'>): void {
       // Anything but a scroll counts as an action the page may scroll in response
       // to, which is what the scroll filter waits out.
-      if (step.action !== 'scrollTo' && step.action !== 'scrollToBottom') {
+      if (!SCROLL_ACTIONS.has(step.action)) {
         lastActionAt = Date.now();
       }
       // A different action means the next load-more scroll is a new sequence.
@@ -330,10 +336,19 @@ export default defineContentScript({
      * a step that the generated script would perform twice.
      */
     const SCROLL_IGNORE_AFTER_ACTION_MS = 700;
+    /**
+     * How long a wheel or touch gesture vouches for the scrolling that follows.
+     * The suppression above is a blunt instrument on its own: a tester who clicks
+     * a filter and immediately scrolls the results loses that scroll entirely.
+     * A wheel event says the *user* is driving, which the page cannot fake.
+     */
+    const USER_GESTURE_WINDOW_MS = 1200;
 
     let scrollTimer = 0;
-    let scrollAnchorY: number | null = null;
+    let scrollAnchor: number | null = null;
+    let scrollSource: Scroller = null;
     let lastActionAt = 0;
+    let lastGestureAt = 0;
 
     /** Within this of the bottom counts as "at the bottom". */
     const BOTTOM_SLACK_PX = 150;
@@ -344,9 +359,11 @@ export default defineContentScript({
 
     /**
      * Consecutive load-more scrolls collapse into one step whose repeat count
-     * grows, rather than one step per round. Any other action ends the run.
+     * grows, rather than one step per round. Any other action ends the run, and
+     * so does scrolling a different list.
      */
     let bottomRuns = 0;
+    let bottomSource: Scroller = null;
 
     const documentHeight = () =>
       Math.max(
@@ -354,81 +371,167 @@ export default defineContentScript({
         document.body?.scrollHeight ?? 0,
       );
 
-    const atBottom = () =>
-      window.scrollY + window.innerHeight >= documentHeight() - BOTTOM_SLACK_PX;
+    /**
+     * Which element the browser actually scrolled: `null` for the page itself,
+     * otherwise the container.
+     *
+     * Reading `window.scrollY` for every scroll — which is what this used to do —
+     * silently discarded every scroll on a site that scrolls a `div` under a
+     * fixed header instead of the document. The events arrived, the offset never
+     * moved, and the burst was thrown away as too small to matter.
+     */
+    function scrollerOf(target: EventTarget | null): Scroller {
+      if (!(target instanceof Element)) return null; // document, i.e. the page
+      if (
+        target === document.scrollingElement ||
+        target === document.documentElement ||
+        target === document.body
+      ) {
+        return null;
+      }
+      return target;
+    }
+
+    const offsetOf = (source: Scroller) => (source ? source.scrollTop : window.scrollY);
+    const viewHeightOf = (source: Scroller) =>
+      source ? source.clientHeight : window.innerHeight;
+    const contentHeightOf = (source: Scroller) =>
+      source ? source.scrollHeight : documentHeight();
+
+    const atBottomOf = (source: Scroller) =>
+      offsetOf(source) + viewHeightOf(source) >= contentHeightOf(source) - BOTTOM_SLACK_PX;
+
+    /** The centre of what the user is looking at: the container's box, or the viewport. */
+    function centreOf(source: Scroller): { cx: number; cy: number } {
+      if (!source) return { cx: window.innerWidth / 2, cy: window.innerHeight / 2 };
+      const rect = source.getBoundingClientRect();
+      return {
+        cx: (Math.max(rect.left, 0) + Math.min(rect.right, window.innerWidth)) / 2,
+        cy: (Math.max(rect.top, 0) + Math.min(rect.bottom, window.innerHeight)) / 2,
+      };
+    }
 
     /**
-     * The element a reader would say the page scrolled *to*: the one nearest the
-     * middle of the viewport that a locator can actually name.
+     * The element a reader would say the view scrolled *to*: the one nearest the
+     * middle that a locator can actually name.
      */
-    function elementAtViewportCentre(): Element | undefined {
-      const cx = window.innerWidth / 2;
-      const cy = window.innerHeight / 2;
+    function elementAtCentre(source: Scroller): Element | undefined {
+      const { cx, cy } = centreOf(source);
       // Probe a short vertical band, since the exact centre may be empty space.
       for (const dy of [0, -60, 60, -120, 120]) {
         const hit = document.elementFromPoint(cx, cy + dy);
         if (!hit || hit === document.body || hit === document.documentElement) continue;
+        if (source && (hit === source || !source.contains(hit))) continue;
+
         const named = hit.closest(
           'button, a[href], input, select, textarea, [role="button"], [data-testid], h1, h2, h3, li, article, section',
         );
-        const candidate = named ?? hit;
+        // `closest` can climb out of the container; the element scrolled to has
+        // to be inside the thing that scrolled.
+        const candidate = named && (!source || source.contains(named)) ? named : hit;
+        if (candidate === source) continue;
         if (candidate.getAttribute('data-qa-plugin-ui')) continue;
         if (shortName(candidate) || candidate.getAttribute('data-testid')) return candidate;
       }
       return undefined;
     }
 
-    function onScroll(): void {
-      if (!recording) return;
-      if (Date.now() - lastActionAt < SCROLL_IGNORE_AFTER_ACTION_MS) return;
+    /** A container scroll has to say which container, or the script scrolls the page. */
+    function scrollExtras(source: Scroller): Partial<RecordedStep> {
+      return source ? { scrollContainer: describeElement(source) } : {};
+    }
 
-      if (scrollAnchorY === null) scrollAnchorY = window.scrollY;
+    /**
+     * Nothing in view could be named — a grid of product images, a map, a chart.
+     * A pixel offset is a poor step, and it is recorded anyway: the alternative
+     * is a recording that omits an action the tester performed, so the script
+     * goes on to click something the page had not lazily rendered yet.
+     */
+    function emitPositionalScroll(source: Scroller): void {
+      emit({
+        id: uid('step'),
+        action: 'scrollPosition',
+        scrollOffset: Math.round(offsetOf(source)),
+        ...scrollExtras(source),
+        note: 'Nothing nameable was in view, so this is a pixel offset. Prefer scrolling to an element.',
+        url: location.href,
+        timestamp: Date.now(),
+      });
+    }
+
+    function recordReveal(source: Scroller): void {
+      flushPendingClick();
+      const anchor = elementAtCentre(source);
+      if (anchor) emit(build('scrollTo', anchor, scrollExtras(source)));
+      else emitPositionalScroll(source);
+    }
+
+    function flushScroll(source: Scroller, from: number): void {
+      if (source && !source.isConnected) return;
+      if (Math.abs(offsetOf(source) - from) < SCROLL_MIN_DELTA) return;
+
+      // At the bottom this may be an infinite list rather than a scroll to
+      // something. The two are told apart by whether the content then grows,
+      // which only becomes visible after the fetch resolves.
+      if (atBottomOf(source)) {
+        const heightBefore = contentHeightOf(source);
+        window.setTimeout(() => {
+          if (!recording) return;
+          if (source && !source.isConnected) return;
+
+          if (contentHeightOf(source) - heightBefore >= GROWTH_MIN_PX) {
+            if (bottomSource !== source) bottomRuns = 0;
+            bottomSource = source;
+            bottomRuns += 1;
+            flushPendingClick();
+            // Same upsert key each round, so the store replaces the previous
+            // step and the count accumulates in place.
+            emit({
+              id: uid('step'),
+              action: 'scrollToBottom',
+              repeat: bottomRuns,
+              upsertKey: 'scroll-to-bottom',
+              ...scrollExtras(source),
+              url: location.href,
+              timestamp: Date.now(),
+            });
+            return;
+          }
+          // The content did not grow: an ordinary scroll that happened to end low.
+          recordReveal(source);
+        }, LOAD_WAIT_MS);
+        return;
+      }
+
+      recordReveal(source);
+    }
+
+    function onScroll(event: Event): void {
+      if (!recording) return;
+      const source = scrollerOf(event.target);
+
+      // A scroll nobody asked for is the page reacting to something that is
+      // already a step. A wheel or touch gesture just before it says otherwise.
+      const userDriven = Date.now() - lastGestureAt < USER_GESTURE_WINDOW_MS;
+      if (!userDriven && Date.now() - lastActionAt < SCROLL_IGNORE_AFTER_ACTION_MS) return;
+
+      // A different scroller means the previous burst is over; measure this one
+      // from where it started rather than mixing the two.
+      if (scrollAnchor === null || scrollSource !== source) {
+        scrollSource = source;
+        scrollAnchor = offsetOf(source);
+      }
+      const from = scrollAnchor;
+
       clearTimeout(scrollTimer);
       scrollTimer = window.setTimeout(() => {
-        const from = scrollAnchorY ?? window.scrollY;
-        scrollAnchorY = null;
-        if (Math.abs(window.scrollY - from) < SCROLL_MIN_DELTA) return;
-
-        // At the bottom of the page this may be an infinite list rather than a
-        // scroll to something. The two are told apart by whether the document
-        // then grows, which only becomes visible after the fetch resolves.
-        if (atBottom()) {
-          const heightBefore = documentHeight();
-          window.setTimeout(() => {
-            if (!recording) return;
-            if (documentHeight() - heightBefore >= GROWTH_MIN_PX) {
-              bottomRuns += 1;
-              flushPendingClick();
-              // Same upsert key each round, so the store replaces the previous
-              // step and the count accumulates in place.
-              emit({
-                id: uid('step'),
-                action: 'scrollToBottom',
-                repeat: bottomRuns,
-                upsertKey: 'scroll-to-bottom',
-                url: location.href,
-                timestamp: Date.now(),
-              });
-              return;
-            }
-            // The page did not grow: an ordinary scroll that happened to end low.
-            const late = elementAtViewportCentre();
-            if (late) {
-              flushPendingClick();
-              emit(build('scrollTo', late));
-            }
-          }, LOAD_WAIT_MS);
-          return;
-        }
-
-        const anchor = elementAtViewportCentre();
-        // With nothing nameable in view there is no robust step to generate, and
-        // a raw offset would be worse than no step at all.
-        if (!anchor) return;
-
-        flushPendingClick();
-        emit(build('scrollTo', anchor));
+        scrollAnchor = null;
+        flushScroll(source, from);
       }, SCROLL_SETTLE_MS);
+    }
+
+    function noteScrollGesture(): void {
+      lastGestureAt = Date.now();
     }
 
     /** The element the user last right-clicked; the menu event does not carry it. */
@@ -564,8 +667,13 @@ export default defineContentScript({
     document.addEventListener('change', onChange, true);
     document.addEventListener('keydown', onKeyDown, true);
     document.addEventListener('contextmenu', onContextMenu, true);
-    // Capture phase, so a scrolling container is seen as well as the document.
-    document.addEventListener('scroll', onScroll, true);
+    // Capture phase, so a scrolling container is seen as well as the document —
+    // a scroll event on a container does not bubble. Passive, because a listener
+    // that can never call preventDefault should not make the page think it might.
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    // Evidence that the user, rather than the page, is doing the scrolling.
+    document.addEventListener('wheel', noteScrollGesture, { capture: true, passive: true });
+    document.addEventListener('touchmove', noteScrollGesture, { capture: true, passive: true });
 
     // Bugs are collected whether or not we are recording, so a tester who
     // notices something wrong can look back at what already happened.

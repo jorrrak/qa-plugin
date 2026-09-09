@@ -1,10 +1,16 @@
 import { uid } from './id';
-import { emptySession, type Issue, type RecordedStep, type Session } from './types';
+import {
+  emptySession,
+  MAX_STEPS,
+  type Issue,
+  type RecordedStep,
+  type Session,
+  type StepPatch,
+} from './types';
 
 const key = (tabId: number) => `session:${tabId}`;
 
 /** Bounds so a runaway page cannot fill up extension storage. */
-const MAX_STEPS = 500;
 const MAX_ISSUES = 200;
 
 /**
@@ -119,22 +125,95 @@ export function renameSession(tabId: number, title: string): Promise<Session> {
   return mutateSession(tabId, (session) => ({ ...session, title }));
 }
 
-export function deleteStep(tabId: number, stepId: string): Promise<Session> {
-  return mutateSession(tabId, (session) => ({
-    ...session,
-    steps: session.steps.filter((s) => s.id !== stepId),
-  }));
+/**
+ * A step's number is its position in the test case, so every structural edit
+ * renumbers the list. Leaving gaps after a delete, or an inserted assertion
+ * numbered 501 in the middle of a flow, makes a printed test case unreadable —
+ * and issues are linked to steps by id, so nothing breaks by renumbering.
+ */
+function renumber(session: Session): Session {
+  const steps = session.steps.map((step, index) => ({ ...step, seq: index + 1 }));
+  return { ...session, steps, nextSeq: steps.length + 1 };
 }
 
-export function annotateStep(
+export function deleteStep(tabId: number, stepId: string): Promise<Session> {
+  return mutateSession(tabId, (session) =>
+    renumber({ ...session, steps: session.steps.filter((s) => s.id !== stepId) }),
+  );
+}
+
+/**
+ * Edit a step's text after the fact — the expected string in an assertion, a
+ * value that was recorded from a stale fixture, a note.
+ *
+ * A password is not editable here, and that is a rule rather than an oversight:
+ * the recorder never captured the text, so accepting one from the panel would
+ * write into the session the one thing the whole design keeps out of it.
+ */
+export function updateStep(
   tabId: number,
   stepId: string,
-  note: string,
+  patch: StepPatch,
 ): Promise<Session> {
   return mutateSession(tabId, (session) => ({
     ...session,
-    steps: session.steps.map((s) => (s.id === stepId ? { ...s, note } : s)),
+    steps: session.steps.map((step) => {
+      if (step.id !== stepId) return step;
+      const next = { ...step };
+      // A note becomes a comment in the generated script, so whitespace at its
+      // edges is never meaningful and a blank one is no note at all. A *value*
+      // is left exactly as given: a trailing space in a field can be the bug.
+      if (patch.note !== undefined) next.note = patch.note.trim() || undefined;
+      if (patch.key !== undefined) next.key = patch.key || undefined;
+      if (patch.value !== undefined && !step.sensitive && !step.variable) {
+        next.value = patch.value;
+      }
+      return next;
+    }),
   }));
+}
+
+export function moveStep(
+  tabId: number,
+  stepId: string,
+  direction: 'up' | 'down',
+): Promise<Session> {
+  return mutateSession(tabId, (session) => {
+    const from = session.steps.findIndex((step) => step.id === stepId);
+    const to = direction === 'up' ? from - 1 : from + 1;
+    if (from < 0 || to < 0 || to >= session.steps.length) return session;
+
+    const steps = [...session.steps];
+    [steps[from], steps[to]] = [steps[to]!, steps[from]!];
+    return renumber({ ...session, steps });
+  });
+}
+
+/**
+ * Put a step the tester wrote by hand into the flow — in practice an assertion
+ * they only thought of after the recording had stopped.
+ */
+export function insertStep(
+  tabId: number,
+  afterStepId: string,
+  step: Omit<RecordedStep, 'seq'>,
+): Promise<Session> {
+  return mutateSession(tabId, (session) => {
+    if (session.steps.length >= MAX_STEPS) return session;
+
+    const found = session.steps.findIndex((existing) => existing.id === afterStepId);
+    // A missing anchor means the step it referred to is gone — deleted from
+    // another panel, or the session was cleared. Appending is better than
+    // dropping the edit on the floor.
+    const index = found < 0 ? session.steps.length : found + 1;
+
+    const steps = [...session.steps];
+    // upsertKey is live-recording bookkeeping. A hand-written step carrying one
+    // would silently replace whatever it landed next to.
+    const { upsertKey: _ignored, ...clean } = step;
+    steps.splice(index, 0, { ...clean, seq: 0 });
+    return renumber({ ...session, steps });
+  });
 }
 
 export async function dropSession(tabId: number): Promise<void> {

@@ -22,6 +22,7 @@ const ACTION_LABEL: Record<string, string> = {
   submit: 'Submit',
   navigate: 'Go to',
   scrollTo: 'Scroll to',
+  scrollPosition: 'Scroll to position',
   scrollToBottom: 'Scroll to load more',
   assertText: 'Assert element text',
   assertTextPresent: 'Assert text on page',
@@ -48,6 +49,8 @@ function valueCell(step: Session['steps'][number]): string {
   // A recorded password is never in the session to begin with; this says so
   // rather than looking like an empty field somebody forgot.
   if (step.sensitive) return '<password not stored>';
+  // A positional scroll has no value of its own; the offset is the whole step.
+  if (step.action === 'scrollPosition') return `${step.scrollOffset ?? 0} px`;
   return step.value ?? '';
 }
 
@@ -78,20 +81,25 @@ export const ISSUE_HEADERS = [
 
 export function stepsTable(sessions: Session[]): Table {
   const rows = sessions.flatMap((session) =>
-    session.steps.map((step) => [
-      session.title,
-      step.seq,
-      ACTION_LABEL[step.action] ?? step.action,
-      step.target?.textName ?? '',
-      step.target?.elementKind ?? '',
-      frameCell(step),
-      step.target?.xpath ?? '',
-      step.target?.cssSelector ?? '',
-      step.target?.testId ?? '',
-      valueCell(step),
-      step.note ?? '',
-      step.url,
-    ]),
+    session.steps.map((step) => {
+      // A scroll that moved a container names the container, so the row is not
+      // a pixel count with no indication of what was scrolled.
+      const target = step.target ?? step.scrollContainer;
+      return [
+        session.title,
+        step.seq,
+        ACTION_LABEL[step.action] ?? step.action,
+        target?.textName ?? '',
+        target?.elementKind ?? '',
+        frameCell(step),
+        target?.xpath ?? '',
+        target?.cssSelector ?? '',
+        target?.testId ?? '',
+        valueCell(step),
+        step.note ?? '',
+        step.url,
+      ];
+    }),
   );
   return { name: 'Steps', headers: STEP_HEADERS, rows };
 }
@@ -105,7 +113,9 @@ export function issuesTable(sessions: Session[]): Table {
         issue.severity,
         issue.kind,
         issue.message,
-        cause ? `${cause.seq}${cause.target?.textName ? ` — ${cause.target.textName}` : ''}` : '',
+        cause
+          ? `${cause.seq}${cause.target?.textName ? ` — ${cause.target.textName}` : ''}`
+          : '',
         issue.count,
         issue.url,
       ];

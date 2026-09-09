@@ -152,6 +152,13 @@ function stepOf(step: RecordedStep): YamlValue {
     action: step.action,
     note: step.note,
     element: elementOf(step),
+    // Only present on a scroll that moved a container rather than the page.
+    scrollContainer: step.scrollContainer
+      ? { name: step.scrollContainer.textName || undefined, xpath: step.scrollContainer.xpath }
+      : undefined,
+    scrollOffset: step.scrollOffset,
+    // How many load-more rounds the tester actually did.
+    repeat: step.repeat,
     frame: frameOf(step),
     // A reference to test data rather than the literal, when there is one.
     variable: step.variable,

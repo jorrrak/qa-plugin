@@ -84,15 +84,36 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
     );
     return lines;
   }
+  if (step.action === 'scrollPosition') {
+    const y = step.scrollOffset ?? 0;
+    lines.push(
+      step.scrollContainer
+        ? `driver.execute_script("arguments[0].scrollTop = ${y}", ${findExpr(step.scrollContainer, options, false)})`
+        : `driver.execute_script("window.scrollTo(0, ${y})")`,
+    );
+    return lines;
+  }
+
   if (step.action === 'scrollToBottom') {
     const rounds = Math.max(2, (step.repeat ?? 1) + 2);
+    // A container scroll has to re-find the element each round: the list
+    // re-renders as it loads, and a stale reference raises
+    // StaleElementReferenceException rather than scrolling.
+    const container = step.scrollContainer;
     lines.push(
       `# Load more by scrolling. Recorded ${step.repeat ?? 1} round(s); stops early once the list stops growing.`,
       `_previous_height = 0`,
       `for _ in range(${rounds}):`,
-      `    driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")`,
+      ...(container
+        ? [
+            `    _scroller = ${findExpr(container, options, false)}`,
+            `    driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", _scroller)`,
+          ]
+        : [`    driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")`]),
       `    time.sleep(0.6)`,
-      `    _height = driver.execute_script("return document.body.scrollHeight")`,
+      container
+        ? `    _height = driver.execute_script("return arguments[0].scrollHeight", _scroller)`
+        : `    _height = driver.execute_script("return document.body.scrollHeight")`,
       `    if _height == _previous_height:`,
       `        break`,
       `    _previous_height = _height`,

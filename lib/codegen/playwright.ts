@@ -48,6 +48,20 @@ function locator(step: RecordedStep, options: CodegenOptions): string {
   return `${root}.locator(${js(`xpath=${target.xpath}`)})`;
 }
 
+/**
+ * The scrollable container a scroll step happened in, when it was not the page.
+ * Built from the same locator machinery as any other element — it is only ever
+ * a different field on the step.
+ */
+function containerLocator(
+  step: RecordedStep,
+  options: CodegenOptions,
+): string | undefined {
+  return step.scrollContainer
+    ? locator({ ...step, target: step.scrollContainer }, options)
+    : undefined;
+}
+
 function statement(step: RecordedStep, options: CodegenOptions): string[] {
   const lines: string[] = [];
   if (step.note) lines.push(`// ${step.note}`);
@@ -63,21 +77,41 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
     return lines;
   }
 
+  if (step.action === 'scrollPosition') {
+    const y = step.scrollOffset ?? 0;
+    const container = containerLocator(step, options);
+    lines.push(
+      container
+        ? `await ${container}.evaluate((el) => { el.scrollTop = ${y}; });`
+        : `await page.evaluate(() => window.scrollTo(0, ${y}));`,
+    );
+    return lines;
+  }
+
   if (step.action === 'scrollToBottom') {
     // The recorded count is the bound, not the exact number: the same list can
     // load a different amount on a different day. The height check is what
     // actually ends the loop, so a short run still works and a long one does not
     // spin forever.
     const rounds = Math.max(2, (step.repeat ?? 1) + 2);
+    const container = containerLocator(step, options);
+    // The braces are not decoration: two load-more steps in one flow would
+    // otherwise declare `previousHeight` twice in the same scope.
     lines.push(
       `// Load more by scrolling. Recorded ${step.repeat ?? 1} round(s); stops early once the list stops growing.`,
-      `let previousHeight = 0;`,
-      `for (let round = 0; round < ${rounds}; round += 1) {`,
-      `  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));`,
-      `  await page.waitForTimeout(600);`,
-      `  const height = await page.evaluate(() => document.body.scrollHeight);`,
-      `  if (height === previousHeight) break;`,
-      `  previousHeight = height;`,
+      `{`,
+      `  let previousHeight = 0;`,
+      `  for (let round = 0; round < ${rounds}; round += 1) {`,
+      container
+        ? `    await ${container}.evaluate((el) => { el.scrollTop = el.scrollHeight; });`
+        : `    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));`,
+      `    await page.waitForTimeout(600);`,
+      container
+        ? `    const height = await ${container}.evaluate((el) => el.scrollHeight);`
+        : `    const height = await page.evaluate(() => document.body.scrollHeight);`,
+      `    if (height === previousHeight) break;`,
+      `    previousHeight = height;`,
+      `  }`,
       `}`,
     );
     return lines;

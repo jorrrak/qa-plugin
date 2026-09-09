@@ -7,12 +7,15 @@ export function Button({
   variant = 'ghost',
   disabled,
   title,
+  compact,
 }: {
   children: ReactNode;
   onClick?: () => void;
   variant?: 'primary' | 'danger' | 'ghost';
   disabled?: boolean;
   title?: string;
+  /** A square icon button. Four of these per step, so the padding matters. */
+  compact?: boolean;
 }) {
   const styles = {
     primary: 'bg-sky-600 text-white hover:bg-sky-500',
@@ -20,6 +23,7 @@ export function Button({
     ghost:
       'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700',
   }[variant];
+  const size = compact ? 'size-6 leading-none' : 'px-2.5 py-1.5';
 
   return (
     <button
@@ -27,7 +31,7 @@ export function Button({
       title={title}
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
+      className={`rounded-md text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${size} ${styles}`}
     >
       {children}
     </button>

@@ -2,16 +2,18 @@ import { defineBackground } from 'wxt/utils/define-background';
 import { onMessage, sendToTab, type Message } from '@/lib/messaging';
 import { uid } from '@/lib/id';
 import {
-  annotateStep,
   appendIssue,
   appendStep,
   clearSession,
   deleteStep,
   dropSession,
+  insertStep,
+  moveStep,
   mutateSession,
   readSession,
   renameSession,
   setRecording,
+  updateStep,
 } from '@/lib/session-store';
 import type { AssertAction, Session } from '@/lib/types';
 import { listVariables } from '@/lib/variables';
@@ -95,9 +97,17 @@ async function handle(message: Message, sender: chrome.runtime.MessageSender) {
       return broadcastAndReturn(await renameSession(message.tabId, message.title));
     case 'deleteStep':
       return broadcastAndReturn(await deleteStep(message.tabId, message.stepId));
-    case 'annotateStep':
+    case 'updateStep':
       return broadcastAndReturn(
-        await annotateStep(message.tabId, message.stepId, message.note),
+        await updateStep(message.tabId, message.stepId, message.patch),
+      );
+    case 'moveStep':
+      return broadcastAndReturn(
+        await moveStep(message.tabId, message.stepId, message.direction),
+      );
+    case 'insertStep':
+      return broadcastAndReturn(
+        await insertStep(message.tabId, message.afterStepId, message.step),
       );
     default:
       return undefined;

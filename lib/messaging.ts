@@ -1,4 +1,4 @@
-import type { AssertAction, Issue, RecordedStep, Session } from './types';
+import type { AssertAction, Issue, RecordedStep, Session, StepPatch } from './types';
 import type { TestVariable } from './variables';
 
 /**
@@ -17,7 +17,9 @@ export type Message =
   | { type: 'clearSession'; tabId: number }
   | { type: 'renameSession'; tabId: number; title: string }
   | { type: 'deleteStep'; tabId: number; stepId: string }
-  | { type: 'annotateStep'; tabId: number; stepId: string; note: string }
+  | { type: 'updateStep'; tabId: number; stepId: string; patch: StepPatch }
+  | { type: 'moveStep'; tabId: number; stepId: string; direction: 'up' | 'down' }
+  | { type: 'insertStep'; tabId: number; afterStepId: string; step: Omit<RecordedStep, 'seq'> }
   // background -> content script
   | { type: 'setRecording'; recording: boolean }
   | { type: 'setVariables'; variables: TestVariable[] }

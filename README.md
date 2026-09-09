@@ -18,7 +18,8 @@ record leaves your machine.
 
 - [Running it](#running-it) · [Architecture](#architecture)
 - [What gets recorded](#what-gets-recorded) — clicks, typing, keys, scrolling, iframes
-- [Assertions](#assertions) · [Test data (variables)](#test-data-variables)
+- [Assertions](#assertions) — including [editing a recording afterwards](#editing-a-recording-afterwards)
+- [Test data (variables)](#test-data-variables)
 - [Exports](#playwright-for-python) — Playwright (TS + Python), Cypress, Selenium,
   Markdown, YAML, CSV, Excel, Zephyr Scale
 - [Publishing](#publishing)
@@ -158,15 +159,49 @@ await page.getByTestId('load-more').scrollIntoViewIfNeeded();
 different on another viewport or with different content, and it is the kind of step
 that passes on the machine that recorded it and nowhere else.
 
-Three filters keep scroll steps from becoming noise, because most scrolling does
+Two filters keep scroll steps from becoming noise, because most scrolling does
 not belong in a test at all — every framework already scrolls an element into view
 before acting on it:
 
 - movement under 60px is treated as incidental
-- scrolling within 700ms of a recorded action is ignored, since clicks and
-  navigations scroll the page themselves
-- if nothing nameable is in view, no step is recorded — an offset would be worse
-  than nothing
+- a scroll within 700ms of a recorded action is ignored **unless a wheel or touch
+  gesture came first**. The suppression is there because clicks and navigations
+  scroll the page themselves; the gesture is the evidence that this one was the
+  user's doing, and a page cannot fake it. Without that second half, a tester who
+  clicks a filter and immediately scrolls the results loses the scroll.
+
+#### Scrolling containers
+
+Half the web scrolls a `div` under a fixed header rather than the document. The
+scroll event for one of those does not bubble and does not move `window.scrollY`,
+so a recorder that watches only the window sees the events arrive and measures no
+movement — and drops every one of them, silently. Each scroll step therefore
+records **what** scrolled:
+
+```ts
+await page.getByText('Nike Pegasus 41').scrollIntoViewIfNeeded();   // works either way
+await page.locator('#results').evaluate((el) => { el.scrollTop = el.scrollHeight; });
+```
+
+`scrollIntoViewIfNeeded` needs no help — it scrolls whatever ancestor has to move.
+The container only has to be named where the step is about the scrolling itself:
+the load-more loop, and the positional fallback below.
+
+#### When nothing can be named
+
+On a grid of product images, a map, or a chart, the element in the middle of the
+view has no accessible name and no test id — there is nothing to write a locator
+for. The step is recorded anyway, as a pixel offset, and flagged:
+
+```ts
+// Nothing nameable was in view, so this is a pixel offset. Prefer scrolling to an element.
+await page.evaluate(() => window.scrollTo(0, 1840));
+```
+
+That offset is a poor step for exactly the reason given above. It is still better
+than the silence it replaced: the tester scrolled, the recording said nothing, and
+the script went on to click something the page had not lazily rendered yet. A bad
+step is visible in the panel and can be fixed; a missing one is not.
 
 ### Infinite scroll
 
@@ -199,6 +234,9 @@ for (let round = 0; round < 6; round += 1) {   // recorded 4 rounds, plus headro
 gesture or an `End` keypress: it needs neither the pointer to be over the list nor
 the body to hold focus. And unlike the fixed offset rejected above, "the bottom" is
 a position with a meaning rather than a number that happened to be true once.
+
+A list that scrolls inside a container gets the same loop against that element
+rather than the window.
 
 Cypress is the exception — its command queue is not imperative, so a
 stop-when-it-stops-growing loop is not expressible. It repeats the recorded count
@@ -313,6 +351,30 @@ Mid-recording, **right-click** any element → "QA — add assertion":
 
 Each assertion is an ordinary step: deletable, annotatable, and placed in the
 script exactly where it was recorded. The panel marks them green with a ✓.
+
+### Editing a recording afterwards
+
+A recording is a first draft, and the assertion a tester wants is almost never the
+one they thought of mid-click — it arrives afterwards, reading the steps back. The
+✎ on each step opens an editor for that:
+
+- **Add an assertion after this step.** The two page-level checks (text on the
+  page, page URL) are always offered. On a step that has an element, the four
+  element checks are offered too and **reuse that step's locator and iframe** —
+  which is why the form lives per-step rather than in one global panel: there is
+  no element picker, and it needs none. `+ Add an assertion at the end` does the
+  same at the bottom of the list.
+- **Edit the value** — the text typed into a field, the expected string in an
+  assertion, a URL.
+- **Reorder** with ↑ / ↓, and delete with ✕. Steps are renumbered by position, so
+  the list always reads 1..n.
+
+What is *not* editable is deliberate. Locators, iframe paths and timestamps are
+the record of what actually happened; rewriting them from the panel would turn
+"edit this test case" into "fabricate a recording". Nor can a value be typed over
+a password step or a variable step — the first never had its text captured, and
+the second is changed under Test data. That rule is enforced in the store, not
+just hidden in the UI.
 
 Long text switches to `contains` automatically because equality on a long
 sentence breaks on any incidental whitespace or copy edit, and that failure

@@ -67,6 +67,19 @@ function rootedLocator(
 }
 
 /**
+ * The scrollable container a scroll step happened in, as a Cypress query. The
+ * iframe rooting is reused wholesale: a scrolling list inside an iframe is not
+ * a special case, it is the same element lookup with a different field.
+ */
+function containerQuery(
+  step: RecordedStep,
+  options: CodegenOptions,
+): string | undefined {
+  if (!step.scrollContainer) return undefined;
+  return rootedLocator({ ...step, target: step.scrollContainer }, options).code;
+}
+
+/**
  * Cypress spells keys as `{enter}` and modifiers as `{ctrl}`, and a combination
  * is written as the modifiers followed by the key — `{ctrl}a`, not `{ctrl+a}`.
  */
@@ -99,15 +112,23 @@ function statement(step: RecordedStep, options: CodegenOptions): string[] {
     );
     return lines;
   }
+  if (step.action === 'scrollPosition') {
+    const y = step.scrollOffset ?? 0;
+    const container = containerQuery(step, options);
+    lines.push(container ? `${container}.scrollTo(0, ${y});` : `cy.scrollTo(0, ${y});`);
+    return lines;
+  }
+
   if (step.action === 'scrollToBottom') {
     const rounds = step.repeat ?? 1;
+    const container = containerQuery(step, options);
     // Cypress queues commands rather than running them inline, so a
     // "stop when it stops growing" loop is not expressible here. The recorded
     // count is repeated instead, which is exactly what the tester did.
     lines.push(
       `// Load more by scrolling, ${rounds} round(s) as recorded.`,
       `Cypress._.times(${rounds}, () => {`,
-      `  cy.scrollTo('bottom');`,
+      container ? `  ${container}.scrollTo('bottom');` : `  cy.scrollTo('bottom');`,
       `  cy.wait(600);`,
       `});`,
     );

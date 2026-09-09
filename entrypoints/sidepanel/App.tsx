@@ -118,8 +118,14 @@ export function App() {
             onDelete={(stepId) =>
               tabId != null && void act({ type: 'deleteStep', tabId, stepId })
             }
-            onAnnotate={(stepId, note) =>
-              tabId != null && void act({ type: 'annotateStep', tabId, stepId, note })
+            onUpdate={(stepId, patch) =>
+              tabId != null && void act({ type: 'updateStep', tabId, stepId, patch })
+            }
+            onMove={(stepId, direction) =>
+              tabId != null && void act({ type: 'moveStep', tabId, stepId, direction })
+            }
+            onInsert={(afterStepId, step) =>
+              tabId != null && void act({ type: 'insertStep', tabId, afterStepId, step })
             }
           />
         ) : tab === 'script' ? (

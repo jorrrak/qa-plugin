@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { isAssertion, type RecordedStep } from '@/lib/types';
+import { isAssertion, MAX_STEPS, type RecordedStep, type StepPatch } from '@/lib/types';
+import { AddAssertion, StepEditor } from './StepEditor';
 import { Badge, Button, CopyableCode, EmptyState } from './ui';
 
 const ACTION_LABEL: Record<RecordedStep['action'], string> = {
@@ -13,6 +14,7 @@ const ACTION_LABEL: Record<RecordedStep['action'], string> = {
   submit: 'Submit',
   navigate: 'Go to',
   scrollTo: 'Scroll to',
+  scrollPosition: 'Scroll (by position)',
   scrollToBottom: 'Scroll to load more',
   assertText: 'Assert element text',
   assertTextPresent: 'Assert text on page',
@@ -48,17 +50,43 @@ function frameLabel(step: RecordedStep): string | undefined {
   return `iframe: ${name}${depth}`;
 }
 
+/** What the step's headline says when the element has no visible text. */
+function headline(step: RecordedStep): string {
+  if (step.target?.textName) return step.target.textName;
+  if (step.action === 'scrollPosition') {
+    const where = step.scrollContainer?.textName;
+    return `${step.scrollOffset ?? 0} px${where ? ` in “${where}”` : ''}`;
+  }
+  if (step.action === 'scrollToBottom') {
+    const where = step.scrollContainer?.textName;
+    return `${step.repeat ?? 1}× to load more${where ? ` in “${where}”` : ''}`;
+  }
+  return step.value || '(no visible text)';
+}
+
+interface StepActions {
+  onDelete: () => void;
+  onUpdate: (patch: StepPatch) => void;
+  onMove: (direction: 'up' | 'down') => void;
+  onInsert: (afterStepId: string, step: Omit<RecordedStep, 'seq'>) => void;
+}
+
 function StepCard({
   step,
-  onDelete,
-  onAnnotate,
+  first,
+  last,
+  full,
+  actions,
 }: {
   step: RecordedStep;
-  onDelete: () => void;
-  onAnnotate: (note: string) => void;
+  first: boolean;
+  last: boolean;
+  full: boolean;
+  actions: StepActions;
 }) {
-  const [editingNote, setEditingNote] = useState(false);
+  const [editing, setEditing] = useState(false);
   const target = step.target;
+  const locator = target ?? step.scrollContainer;
 
   return (
     <li className="rounded-lg border border-slate-200 bg-white p-2.5 dark:border-slate-700 dark:bg-slate-900">
@@ -76,9 +104,9 @@ function StepCard({
             {target && <Badge>{KIND_LABEL[target.elementKind] ?? target.elementKind}</Badge>}
             {target && !target.unique && <Badge tone="amber">ambiguous locator</Badge>}
             {step.sensitive && <Badge tone="emerald">password — not stored</Badge>}
-            {step.typeSequentially && (
-              <Badge tone="amber" >typed key by key</Badge>
-            )}
+            {step.typeSequentially && <Badge tone="amber">typed key by key</Badge>}
+            {/* Worth flagging: the generated step scrolls that element, not the page. */}
+            {step.scrollContainer && <Badge tone="amber">in a scrollable area</Badge>}
             {frameLabel(step) && (
               <Badge tone={step.framePath?.some((f) => f.unresolved) ? 'red' : 'amber'}>
                 {frameLabel(step)}
@@ -92,7 +120,7 @@ function StepCard({
             dir="auto"
             className="truncate text-sm font-medium text-slate-800 dark:text-slate-100"
           >
-            {target?.textName || step.value || '(no visible text)'}
+            {headline(step)}
           </p>
 
           {step.variable ? (
@@ -111,37 +139,46 @@ function StepCard({
             )
           )}
 
-          {target && <CopyableCode value={target.xpath} />}
+          {locator && <CopyableCode value={locator.xpath} />}
 
           {target?.testId && (
             <p className="text-[10px] text-emerald-600">data-testid: {target.testId}</p>
           )}
 
-          {editingNote ? (
-            <input
-              autoFocus
-              defaultValue={step.note ?? ''}
-              placeholder="Note for this step…"
-              onBlur={(event) => {
-                onAnnotate(event.currentTarget.value.trim());
-                setEditingNote(false);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') event.currentTarget.blur();
-                if (event.key === 'Escape') setEditingNote(false);
-              }}
-              className="w-full rounded border border-slate-300 px-1.5 py-1 text-[11px] outline-none focus:border-sky-500 dark:border-slate-600 dark:bg-slate-800"
+          {!editing && step.note && (
+            <p dir="auto" className="text-[11px] italic text-slate-500">
+              {step.note}
+            </p>
+          )}
+
+          {editing && (
+            <StepEditor
+              step={step}
+              full={full}
+              onUpdate={actions.onUpdate}
+              onInsert={actions.onInsert}
+              onClose={() => setEditing(false)}
             />
-          ) : (
-            step.note && <p className="text-[11px] italic text-slate-500">{step.note}</p>
           )}
         </div>
 
-        <div className="flex shrink-0 flex-col gap-1">
-          <Button title="Add a note" onClick={() => setEditingNote(true)}>
+        {/* Two by two rather than a column: four stacked buttons set a minimum
+            card height taller than most steps' own content. */}
+        <div className="grid shrink-0 grid-cols-2 gap-1">
+          <Button compact title="Move up" disabled={first} onClick={() => actions.onMove('up')}>
+            ↑
+          </Button>
+          <Button compact title="Move down" disabled={last} onClick={() => actions.onMove('down')}>
+            ↓
+          </Button>
+          <Button
+            compact
+            title="Edit this step, or add an assertion after it"
+            onClick={() => setEditing((open) => !open)}
+          >
             ✎
           </Button>
-          <Button title="Delete this step" onClick={onDelete}>
+          <Button compact title="Delete this step" onClick={actions.onDelete}>
             ✕
           </Button>
         </div>
@@ -154,36 +191,70 @@ export function StepList({
   steps,
   recording,
   onDelete,
-  onAnnotate,
+  onUpdate,
+  onMove,
+  onInsert,
 }: {
   steps: RecordedStep[];
   recording: boolean;
   onDelete: (stepId: string) => void;
-  onAnnotate: (stepId: string, note: string) => void;
+  onUpdate: (stepId: string, patch: StepPatch) => void;
+  onMove: (stepId: string, direction: 'up' | 'down') => void;
+  onInsert: (afterStepId: string, step: Omit<RecordedStep, 'seq'>) => void;
 }) {
+  const [appending, setAppending] = useState(false);
+
   if (steps.length === 0) {
     return (
       <EmptyState
         title={recording ? 'Recording — go use the page' : 'Nothing recorded yet'}
         hint={
           recording
-            ? 'Every click, keystroke and navigation is captured with the element XPath and its visible name. Right-click an element to add an assertion.'
+            ? 'Every click, keystroke, scroll and navigation is captured with the element XPath and its visible name. Right-click an element to add an assertion.'
             : 'Press Start recording, then run your scenario in the active tab.'
         }
       />
     );
   }
 
+  const lastStep = steps[steps.length - 1]!;
+  // Inserting past the cap is refused by the store; say so rather than no-op.
+  const full = steps.length >= MAX_STEPS;
+
   return (
-    <ul className="space-y-1.5 p-2">
-      {steps.map((step) => (
-        <StepCard
-          key={step.id}
-          step={step}
-          onDelete={() => onDelete(step.id)}
-          onAnnotate={(note) => onAnnotate(step.id, note)}
+    <div className="space-y-1.5 p-2">
+      <ul className="space-y-1.5">
+        {steps.map((step, index) => (
+          <StepCard
+            key={step.id}
+            step={step}
+            first={index === 0}
+            last={index === steps.length - 1}
+            full={full}
+            actions={{
+              onDelete: () => onDelete(step.id),
+              onUpdate: (patch) => onUpdate(step.id, patch),
+              onMove: (direction) => onMove(step.id, direction),
+              onInsert,
+            }}
+          />
+        ))}
+      </ul>
+
+      {full ? (
+        <p className="px-1 text-[11px] text-amber-600 dark:text-amber-400">
+          This test case holds the maximum of {MAX_STEPS} steps. Delete one to add
+          an assertion.
+        </p>
+      ) : appending ? (
+        <AddAssertion
+          anchor={lastStep}
+          onInsert={onInsert}
+          onDone={() => setAppending(false)}
         />
-      ))}
-    </ul>
+      ) : (
+        <Button onClick={() => setAppending(true)}>+ Add an assertion at the end</Button>
+      )}
+    </div>
   );
 }

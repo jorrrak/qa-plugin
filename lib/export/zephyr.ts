@@ -40,6 +40,14 @@ function elementPhrase(step: RecordedStep): string {
   return `${quoted(target.textName)} ${kind}`;
 }
 
+/** Names the scrolling area, when it was not the page itself. */
+function withinContainer(step: RecordedStep): string {
+  const container = step.scrollContainer;
+  if (!container) return '';
+  const name = container.textName?.trim();
+  return name ? ` inside the "${name}" area` : ' inside the scrollable area';
+}
+
 /** The action as an instruction a person can follow without reading code. */
 function stepSentence(step: RecordedStep): string {
   switch (step.action) {
@@ -62,9 +70,11 @@ function stepSentence(step: RecordedStep): string {
     case 'submit':
       return `Submit ${elementPhrase(step)}`;
     case 'scrollTo':
-      return `Scroll until ${elementPhrase(step)} is in view`;
+      return `Scroll until ${elementPhrase(step)} is in view${withinContainer(step)}`;
+    case 'scrollPosition':
+      return `Scroll down about ${step.scrollOffset ?? 0} pixels${withinContainer(step)}`;
     case 'scrollToBottom':
-      return `Scroll to the bottom of the list ${step.repeat ?? 1} time(s) to load more items`;
+      return `Scroll to the bottom of the list${withinContainer(step)} ${step.repeat ?? 1} time(s) to load more items`;
     default:
       return `Verify ${elementPhrase(step)}`;
   }
