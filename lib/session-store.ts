@@ -1,4 +1,5 @@
 import { uid } from './id';
+import { dropDrafts } from './script-drafts';
 import {
   emptySession,
   MAX_STEPS,
@@ -114,11 +115,17 @@ export function appendIssue(
 }
 
 export function clearSession(tabId: number): Promise<Session> {
-  return mutateSession(tabId, (session) => ({
-    ...emptySession(tabId, session.title),
-    id: uid('s'),
-    recording: session.recording,
-  }));
+  return mutateSession(tabId, (session) => {
+    // A cleared session gets a fresh id, so any hand-edited script left over
+    // from the old one becomes unreachable. Drop it rather than leaving it in
+    // storage for the life of the profile.
+    void dropDrafts(session.id);
+    return {
+      ...emptySession(tabId, session.title),
+      id: uid('s'),
+      recording: session.recording,
+    };
+  });
 }
 
 export function renameSession(tabId: number, title: string): Promise<Session> {
@@ -218,5 +225,7 @@ export function insertStep(
 
 export async function dropSession(tabId: number): Promise<void> {
   chains.delete(tabId);
+  const session = await readSession(tabId);
+  await dropDrafts(session.id);
   await chrome.storage.local.remove(key(tabId));
 }

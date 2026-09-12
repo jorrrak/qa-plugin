@@ -18,7 +18,8 @@ record leaves your machine.
 
 - [Running it](#running-it) · [Architecture](#architecture)
 - [What gets recorded](#what-gets-recorded) — clicks, typing, keys, scrolling, iframes
-- [Assertions](#assertions) — including [editing a recording afterwards](#editing-a-recording-afterwards)
+- [Assertions](#assertions) — including [editing a recording](#editing-a-recording-afterwards)
+  and [editing the generated script](#editing-the-generated-script)
 - [Test data (variables)](#test-data-variables)
 - [Exports](#playwright-for-python) — Playwright (TS + Python), Cypress, Selenium,
   Markdown, YAML, CSV, Excel, Zephyr Scale
@@ -400,6 +401,37 @@ points at no real bug.
 For text assertions the element is exactly what was right-clicked. For visibility
 and value assertions it resolves up to the nearest interactive ancestor — when
 you right-click the label inside a button, you meant the button.
+
+### Editing the generated script
+
+The Script tab's code pane is editable. Copy and Download hand over what is in
+it, so a wait, a comment or a hand-written line can go into the file without a
+round trip through an editor.
+
+That makes it a fork of generated output, and the question that decides the
+design is what happens when the steps change afterwards. Keeping the stale text
+silently is wrong; throwing the edit away silently is worse. So an edit is stored
+as a **draft** that records the version of the script it started from, and when
+the steps move on the panel says so and offers to revert. Neither choice is made
+for you.
+
+- One draft per format **and** locator strategy. Editing the Playwright output
+  and switching to Cypress shows Cypress's own generated code, not your edit.
+- Drafts survive switching tabs and closing the panel. They are dropped when the
+  test case is cleared or the browser tab closes.
+- Typing the generated text back by hand removes the draft rather than storing a
+  copy of it.
+- A binary format — the two Excel exports — has no script to edit, only a note
+  saying so, and its pane stays read-only.
+
+Drafts are stored under their own key, **never inside the session object**. That
+is a security boundary rather than tidiness: the library and every export are
+built from the session, and a hand-edited script is the one place in this
+extension where a literal password can appear. Keeping drafts out of the session
+means they stay on this machine and never travel in a shared `qa-library.json`.
+
+The steps remain the source of truth. Every other format, and every export, is
+still generated from them — an edit changes one pane, not the recording.
 
 ### Element text vs. text on the page
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.10.0
+
+- **The generated script is editable.** The Script tab's code pane takes edits,
+  and Copy and Download hand over what is in it — so a wait, a comment or a
+  hand-written line goes straight into the file.
+
+  An edit to generated output is a fork, and what decides the design is what
+  happens when the steps change afterwards. An edit is kept as a draft that
+  records the version of the script it started from; when the steps move on, the
+  panel says so and offers to revert, rather than silently keeping stale text or
+  silently discarding the edit. One draft per format and locator strategy; drafts
+  survive a tab switch and a closed panel, and are dropped when the test case is
+  cleared or its browser tab closes. Typing the generated text back by hand
+  removes the draft instead of storing a copy of it. The two Excel formats have
+  no script to edit and stay read-only.
+
+  Drafts are stored under their own storage key, never inside the session. The
+  library and every export are built from the session object, and a hand-edited
+  script is the one place in this extension where a literal password can appear —
+  so drafts stay on the machine and never travel in a shared `qa-library.json`.
+
 ## 0.9.1
 
 Hotfix: a recording could come out with no `goto` in it.
